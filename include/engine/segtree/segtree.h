@@ -3,7 +3,6 @@
 #include <cassert>
 #include <vector>
 #include <optional>
-#include <cassert>
 
 #include "../interface.h"
 
@@ -29,13 +28,16 @@ namespace NProust {
             assert(rangeStart <= rangeEnd && "Range start can't be bigger than its end");
             assert(rangeEnd <= AllocatedLength && "Range goes beyond the allocated length");
 
-            ModifyNodes(0, rangeStart, rangeEnd, 0, AllocatedLength, value);
+            if (rangeStart < rangeEnd) {
+                ModifyNodes(0, rangeStart, rangeEnd, 0, AllocatedLength, value);
+            }
 
             return CurrentVersion++;
         }
 
         virtual TOperationResult ComputeRange(const size_t rangeStart, const size_t rangeEnd) override {
             assert(rangeStart <= rangeEnd && "Range start can't be bigger than its end");
+            assert(rangeStart != rangeEnd && "The operation result for an empty set is undefined");
             assert(rangeEnd <= AllocatedLength && "Range goes beyond the allocated length");
             return QueryNodes(0, rangeStart, rangeEnd, 0, AllocatedLength);
         }
@@ -101,16 +103,18 @@ namespace NProust {
         void Propagate(const TNodeIndex nodeId, const size_t nodeStart, const size_t nodeEnd) {
             TNode& currentNode = Nodes[nodeId];
 
-            // Asserting, but it must also be checked upstream, before calling the propagation.
+            // Asserting, but it must also be checked upstream, before calling propagation.
             assert(currentNode.LazilyPropagated.has_value());
             const TValue toPropagate = *currentNode.LazilyPropagated;
 
-            currentNode.SubtreeValue = TOperation::template Repeat<TValue, TOperationResult>(toPropagate, nodeEnd - nodeStart);
             currentNode.LazilyPropagated = std::nullopt;
+            currentNode.SubtreeValue = TOperation::template Repeat<TValue, TOperationResult>(toPropagate, nodeEnd - nodeStart);
             const size_t midpoint = nodeStart + ((nodeEnd - nodeStart) >> 1);
 
             Nodes[nodeId + 1].LazilyPropagated = toPropagate;
+            Nodes[nodeId + 1].SubtreeValue = TOperation::template Repeat<TValue, TOperationResult>(toPropagate, midpoint - nodeStart);
             Nodes[nodeId + ((midpoint - nodeStart) << 1)].LazilyPropagated = toPropagate;
+            Nodes[nodeId + ((midpoint - nodeStart) << 1)].SubtreeValue = TOperation::template Repeat<TValue, TOperationResult>(toPropagate, nodeEnd - midpoint);
         }
 
         TOperationResult QueryNodes(const TNodeIndex nodeId, const size_t rangeStart, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd) {
