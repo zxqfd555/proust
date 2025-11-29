@@ -1,100 +1,152 @@
 #pragma once
+
+#include <cassert>
+#include <vector>
+#include <optional>
+#include <cassert>
+
 #include "../interface.h"
 
 namespace NProust {
-    template<typename TValue>
-    class TDynamicNode {
+    // TODO: it doesn't make any sense to limit the size of the node index. Maybe there is
+    // some sense in using 4-byte ranges, not the 64-bit ones.
+    using TNodeIndex = size_t;
+
+    template<typename TValue, typename TOperationResult, typename TOperation>
+    class TSegmentTreeEngine: public IEngine<TValue, TOperationResult, TOperation> {
     public:
-        TDynamicNode(const size_t rangeStart, const size_t rangeEnd, const std::unique_ptr<TDynamicNode<TValue>> leftChild, const std::unique_ptr<TDynamicNode<TValue>> rightChild)
-            : RangeStart(rangeStart)
-            , RangeEnd(rangeEnd)
-            , LeftChild(leftChild)
-            , rightChild(rightChild)
-            , MaxSubtree(0)
-            , AddedValue(0)
-        {
-        }
-
-        // Create a DynamicNode for the [rangeStart; rangeEnd) interval
-        static std::unique_ptr<TNode> Init(const size_t rangeStart, const size_t rangeEnd) {
-            if rangeStart + 1 == rangeEnd {
-                return std::make_unique<TDynamicNode<TValue>>(rangeStart, rangeEnd, nullptr, nullptr);
-            }
-            const size_t midpoint = rangeStart + (rangeEnd - rangeStart) / 2;
-            const auto leftChild = Init(rangeStart, midpoint);
-            const auto rightChild = Init(midpoint, rangeEnd);
-            return std::make_unique<TDynamicNode<TValue>>(rangeStart, rangeEnd, leftChild, rightChild);
-        }
-
-        void IncreaseRange(const size_t rangeStart, const size_t rangeEnd, const TValue value) {
-            if rangeStart <= RangeStart && RangeEnd <= rangeEnd {
-                AddedValue += value;
-            } else {
-                if rangeStart < LeftChild->RangeEnd {
-                    LeftChild->IncreaseRange(rangeStart, rangeEnd, value);
-                }
-                if RightChild->RangeStart < rangeEnd {
-                    RightChild->IncreaseRange(rangeStart, rangeEnd, value);
-                }
-                MaxSubtree = std::max(LeftChild->MaxSubtree + LeftChild->AddedValue, RightChild->MaxSubtree + RightChild->AddedValue);
-            }
-        }
-
-        TValue Query(const size_t rangeStart, const size_t rangeEnd, const TValue addedAbove = TValue()) const {
-            if rangeStart <= RangeStart && RangeEnd <= rangeEnd {
-                return MaxSubtree + AddedValue + addedAbove;
-            }
-            const bool leftChildConcerned = rangeStart < LeftChild->RangeEnd;
-            const bool rightChildConcerned = RightChild->RangeStart < rangeEnd
-            if leftChildConcerned && rightChildConcerned {
-                return std::max(
-                    LeftChild->Query(rangeStart, rangeEnd, addedAbove + AddedValue),
-                    RightChild->Query(rangeStart, rangeEnd, addedAbove + addedValue)
-                );
-            } else if leftChildConcerned {
-                return LeftChild->Query(rangeStart, rangeEnd, addedAbove + AddedValue);
-            } else {
-                return RightChild->Query(rangeStart, rangeEnd, addedAbove + AddedValue);
-            }
-        }
-
-    private:
-        size_t RangeStart;
-        size_t RangeEnd;
-        TValue Max;
-        TValue Added;
-        std::unique_ptr<TDynamicNode<TValue>> LeftChild;
-        std::unique_ptr<TDynamicNode<TValue>> RightChild;
-    };
-
-    template<typename TValue>
-    class TSegmentTreeEngine: public IEngine<TValue> {
-    public:
-        TSegmentTreeEngine()
-            : Root(nullptr)
-        {
-        }
-
         virtual TVersion Init(const size_t length) override {
-            Root = TDynamicNode::Init(0, length);
+            Nodes.resize(length << 1);
+            NodeCount = 0;
+            AllocatedLength = length;
+
+            assert(InitNodes(0, length) == 0 && "The root node isn't the first one");
+
+            return CurrentVersion++;
         }
 
-        virtual TVersion Modify(const size_t rangeStart, const size_t rangeEnd, const TValue value) override {
-            assert(Root && "The tree is not initialized");
-            assert(rangeStart < rangeEnd && "Range start must be less than its end");
-            assert(rangeEnd <= Root->RangeEnd && "Range exceeds the initialized capacity");
+        virtual TVersion SetRange(const size_t rangeStart, const size_t rangeEnd, const TValue& value) override {
+            assert(rangeStart <= rangeEnd && "Range start can't be bigger than its end");
+            assert(rangeEnd <= AllocatedLength && "Range goes beyond the allocated length");
+
+            ModifyNodes(0, rangeStart, rangeEnd, 0, AllocatedLength, value);
+
+            return CurrentVersion++;
         }
 
-        virtual TValue Query(const size_t left, const size_t right) override {
-            return TValue();  // TODO
+        virtual TOperationResult ComputeRange(const size_t rangeStart, const size_t rangeEnd) override {
+            assert(rangeStart <= rangeEnd && "Range start can't be bigger than its end");
+            assert(rangeEnd <= AllocatedLength && "Range goes beyond the allocated length");
+            return QueryNodes(0, rangeStart, rangeEnd, 0, AllocatedLength);
         }
 
     private:
-        TDynamicNode<TValue> Root;
+        struct TNode {
+            TOperationResult SubtreeValue;
+            std::optional<TValue> LazilyPropagated;
+
+            TNode() = default;
+
+            TNode(const size_t rangeLength)
+                : SubtreeValue(TOperation::template Repeat<TValue, TOperationResult>(TValue(), rangeLength))
+                , LazilyPropagated(std::nullopt)
+            {
+            }
+        };
+
+        size_t AllocatedLength{0};
+        std::vector<TNode> Nodes;
+        size_t NodeCount{0};
+        TVersion CurrentVersion{0};
+
+        TNodeIndex InitNodes(const size_t nodeStart, const size_t nodeEnd) {
+            const TNodeIndex currentNodeId = NodeCount++;
+            assert(currentNodeId < Nodes.size() && "There aren't enough pre-allocated nodes");
+            Nodes[currentNodeId] = TNode(nodeEnd - nodeStart);
+
+            if (nodeStart + 1 < nodeEnd) {
+                const size_t midpoint = nodeStart + ((nodeEnd - nodeStart) >> 1);
+                InitNodes(nodeStart, midpoint);
+                InitNodes(midpoint, nodeEnd);
+            }
+
+            return currentNodeId;
+        }
+
+        void ModifyNodes(const TNodeIndex nodeId, const size_t rangeStart, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd, const TValue& value) {
+            TNode& currentNode = Nodes[nodeId];
+            if (rangeStart <= nodeStart && rangeEnd >= nodeEnd) {
+                currentNode.LazilyPropagated = value;
+                currentNode.SubtreeValue = TOperation::template Repeat<TValue, TOperationResult>(value, nodeEnd - nodeStart);
+                return;
+            }
+
+            if (Nodes[nodeId].LazilyPropagated.has_value()) {
+                Propagate(nodeId, nodeStart, nodeEnd);
+            }
+
+            const size_t midpoint = nodeStart + ((nodeEnd - nodeStart) >> 1);
+            const TNodeIndex leftSubtreeSize = ((midpoint - nodeStart) << 1) - 1;
+            const TNodeIndex leftChildId = nodeId + 1;
+            const TNodeIndex rightChildId = nodeId + leftSubtreeSize + 1;
+            if (midpoint > rangeStart) {
+                ModifyNodes(leftChildId, rangeStart, rangeEnd, nodeStart, midpoint, value);
+            }
+            if (midpoint < rangeEnd) {
+                ModifyNodes(rightChildId, rangeStart, rangeEnd, midpoint, nodeEnd, value);
+            }
+            currentNode.SubtreeValue = TOperation::Merge(Nodes[leftChildId].SubtreeValue, Nodes[rightChildId].SubtreeValue);
+        }
+
+        void Propagate(const TNodeIndex nodeId, const size_t nodeStart, const size_t nodeEnd) {
+            TNode& currentNode = Nodes[nodeId];
+
+            // Asserting, but it must also be checked upstream, before calling the propagation.
+            assert(currentNode.LazilyPropagated.has_value());
+            const TValue toPropagate = *currentNode.LazilyPropagated;
+
+            currentNode.SubtreeValue = TOperation::template Repeat<TValue, TOperationResult>(toPropagate, nodeEnd - nodeStart);
+            currentNode.LazilyPropagated = std::nullopt;
+            const size_t midpoint = nodeStart + ((nodeEnd - nodeStart) >> 1);
+
+            Nodes[nodeId + 1].LazilyPropagated = toPropagate;
+            Nodes[nodeId + ((midpoint - nodeStart) << 1)].LazilyPropagated = toPropagate;
+        }
+
+        TOperationResult QueryNodes(const TNodeIndex nodeId, const size_t rangeStart, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd) {
+            const TNode& currentNode = Nodes[nodeId];
+            if (currentNode.LazilyPropagated.has_value()) {
+                const size_t segmentStart = std::max(rangeStart, nodeStart);
+                const size_t segmentEnd = std::min(rangeEnd, nodeEnd);
+                return TOperation::template Repeat<TValue, TOperationResult>(*currentNode.LazilyPropagated, segmentEnd - segmentStart);
+            }
+
+            if (rangeStart <= nodeStart && rangeEnd >= nodeEnd) {
+                return currentNode.SubtreeValue;
+            }
+
+            const size_t midpoint = nodeStart + ((nodeEnd - nodeStart) >> 1);
+            if (midpoint > rangeStart) {
+                const TNodeIndex leftChildId = nodeId + 1;
+                const TOperationResult leftResult = QueryNodes(leftChildId, rangeStart, rangeEnd, nodeStart, midpoint);
+                if (midpoint < rangeEnd) {
+                    const TNodeIndex leftSubtreeSize = ((midpoint - nodeStart) << 1) - 1;
+                    const TNodeIndex rightChildId = nodeId + leftSubtreeSize + 1;
+                    const TOperationResult rightResult = QueryNodes(rightChildId, rangeStart, rangeEnd, midpoint, nodeEnd);
+                    return TOperation::Merge(leftResult, rightResult);
+                } else {
+                    return leftResult;
+                }
+            }
+
+            const TNodeIndex leftSubtreeSize = ((midpoint - nodeStart) << 1) - 1;
+            const TNodeIndex rightChildId = nodeId + leftSubtreeSize + 1;
+            return QueryNodes(rightChildId, rangeStart, rangeEnd, midpoint, nodeEnd);
+        }
     };
 
-    template<typename TValue>
-    std::unique_ptr<IEngine<TValue>> CreateSegmentTreeEngine() {
-        return std::make_unique<TSegmentTreeEngine<TValue>>();
+    template<typename TValue, typename TOperationResult, typename TOperation>
+    std::unique_ptr<IEngine<TValue, TOperationResult, TOperation>> CreateRobustEngine() {
+        return std::make_unique<TSegmentTreeEngine<TValue, TOperationResult, TOperation>>();
     }
 } // namespace NProust
