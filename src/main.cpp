@@ -98,7 +98,7 @@ void StressTest(const size_t length, const size_t queryCount, std::function<TVal
 
 int main() {
     StressTest<int64_t, int64_t, NProust::TSumOperation>(
-        100000,
+        1000000,
         1000000,
         [](std::mt19937& generator) {
             static std::uniform_int_distribution<int64_t> valueDistribution(-100, 100);
