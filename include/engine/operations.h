@@ -1,3 +1,5 @@
+#pragma once
+
 namespace NProust {
     struct TSumOperation {
         template<typename TValue, typename TOperationResult>

@@ -19,6 +19,12 @@ else()
     )
 endif()
 
+find_package(spdlog CONFIG REQUIRED)
+
+add_library(project_dependencies INTERFACE)
+target_link_libraries(project_dependencies INTERFACE spdlog::spdlog)
+target_compile_features(project_dependencies INTERFACE cxx_std_23)
+
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
 add_subdirectory(src)
