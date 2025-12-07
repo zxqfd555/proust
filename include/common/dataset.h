@@ -6,36 +6,22 @@
 
 #include <spdlog/spdlog.h>
 
+#include "query.h"
 #include "engine/naive/naive.h"
+#include "serialization/dataset.h"
 
 namespace NProust {
-    enum class EEngineOperation { 
-        SetRange,
-        Query,
-    };
-
-    template<typename TValue, typename TOperationResult>
-    struct TTestPlanItem {
-        EEngineOperation Operation;
-        size_t Left;
-        size_t Right;
-        std::optional<TValue> Value;
-        std::optional<TOperationResult> ExpectedResult;
-
-        TTestPlanItem() = default;
-
-        TTestPlanItem(const EEngineOperation operation, const size_t left, const size_t right, const std::optional<TValue> value, const std::optional<TOperationResult> expectedResult)
-            : Operation(operation)
-            , Left(left)
-            , Right(right)
-            , Value(value)
-            , ExpectedResult(expectedResult)
-        {
-        }
-    };
+    template<class TValue>
+    std::function<TValue(std::mt19937&)> CreateRandomIntGenerator(const TValue lower, const TValue upper) {
+        return [lower, upper](std::mt19937& generator) {
+            static std::uniform_int_distribution<TValue> valueDistribution(lower, upper);
+            auto value = valueDistribution(generator);
+            return value;
+        };
+    }
 
     template<typename TValue, typename TOperationResult, typename TOperation>
-    std::vector<TTestPlanItem<TValue, TOperationResult>> GenerateTestPlan(const size_t length, const size_t queryCount, std::function<TValue(std::mt19937&)> valueGenerator) {
+    void GenerateTestPlan(const size_t length, const size_t queryCount, std::function<TValue(std::mt19937&)> valueGenerator, TStreamingDatasetWriter<TValue, TOperationResult>& target) {
         const auto generationStartedAt = std::chrono::high_resolution_clock::now();
 
         std::mt19937 rng(std::random_device{}());
@@ -46,8 +32,6 @@ namespace NProust {
         auto naiveEngine = NProust::CreateNaiveEngine<TValue, TOperationResult, TOperation>();
 
         naiveEngine->Init(length);
-        std::vector<TTestPlanItem<TValue, TOperationResult>> testPlan;
-        testPlan.reserve(queryCount);
         for (size_t querySeqIdx = 0; querySeqIdx < queryCount; ++querySeqIdx) {
             size_t left = leftDist(rng);
             size_t right = rightDist(rng);
@@ -60,7 +44,9 @@ namespace NProust {
                 case EEngineOperation::SetRange: {
                     const auto value = valueGenerator(rng);
                     naiveEngine->SetRange(left, right, value);
-                    testPlan.emplace_back(operation, left, right, value, std::nullopt);
+
+                    const auto item = TTestPlanItem<TValue, TOperationResult>(operation, left, right, value, std::nullopt);
+                    target.SaveQuery(item);
                     break;
                 }
                 case EEngineOperation::Query: {
@@ -68,16 +54,29 @@ namespace NProust {
                         right += 1;
                     }
                     const auto expectedResult = naiveEngine->ComputeRange(left, right);
-                    testPlan.emplace_back(operation, left, right, std::nullopt, expectedResult);
+
+                    const auto item = TTestPlanItem<TValue, TOperationResult>(operation, left, right, std::nullopt, expectedResult);
+                    target.SaveQuery(item);
                     break;
                 }
             }
         }
+        target.Finalize();
+
         auto generationEndedAt = std::chrono::high_resolution_clock::now();
         auto generationDuration = std::chrono::duration_cast<std::chrono::milliseconds>(generationEndedAt - generationStartedAt);
         spdlog::info("The test plan has been generated. Time elapsed: {} ms", generationDuration.count());
-
-        return testPlan;
     }
 
+    template<typename TValue, typename TOperationResult, typename TOperation>
+    void GenerateTestPlanIntoFile(const size_t length, const size_t queryCount, std::function<TValue(std::mt19937&)> valueGenerator, const std::string& targetPath) {
+        auto streamer = TStreamingDatasetWriter<TValue, TOperationResult>(queryCount, length, targetPath);
+        GenerateTestPlan<TValue, TOperationResult, TOperation>(length, queryCount, valueGenerator, streamer);
+    }
+
+    template<typename TValue, typename TOperationResult, typename TOperation>
+    void GenerateTestPlanIntoOstream(const size_t length, const size_t queryCount, std::function<TValue(std::mt19937&)> valueGenerator, std::ostream& target) {
+        auto streamer = TStreamingDatasetWriter<TValue, TOperationResult>(queryCount, length, target);
+        GenerateTestPlan<TValue, TOperationResult, TOperation>(length, queryCount, valueGenerator, streamer);
+    }
 } // namespace NProust

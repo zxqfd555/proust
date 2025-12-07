@@ -4,6 +4,7 @@ find_package(GTest REQUIRED)
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
 add_executable(tests
+    test_dataset_serialization.cpp
     test_in_memory_simple.cpp
     test_in_memory_stress.cpp
 )

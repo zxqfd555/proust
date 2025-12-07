@@ -9,17 +9,28 @@
 #include "engine/segtree/segtree.h"
 #include "engine/operations.h"
 
+using NProust::CreateRandomIntGenerator;
+
 template<typename TValue, typename TOperationResult, typename TOperation>
 void StressTest(const size_t length, const size_t queryCount, std::function<TValue(std::mt19937&)> valueGenerator) {
-    const auto testPlan = NProust::GenerateTestPlan<TValue, TOperationResult, TOperation>(length, queryCount, valueGenerator);
-    const auto testStartedAt = std::chrono::high_resolution_clock::now();
+    std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
+    NProust::TStreamingDatasetWriter<TValue, TOperationResult> writer(queryCount, length, stream);
+    NProust::GenerateTestPlan<TValue, TOperationResult, TOperation>(length, queryCount, valueGenerator, writer);
 
+    stream.seekg(0);
+    NProust::TStreamingDatasetReader<TValue, TOperationResult> reader(stream);
+
+    const auto testStartedAt = std::chrono::high_resolution_clock::now();
     auto robustEngine = NProust::CreateRobustEngine<TValue, TOperationResult, TOperation>();
     robustEngine->Init(length);
-    for (const auto& planItem : testPlan) {
+    while (auto maybeItem = reader.NextQuery()) {
+        if (!maybeItem.has_value()) {
+            break;
+        }
+        const auto planItem = *maybeItem;
         switch (planItem.Operation) {
             case NProust::EEngineOperation::SetRange: {
-                assert(planItem.Value.has_value());
+                EXPECT_TRUE(planItem.Value.has_value());
                 robustEngine->SetRange(planItem.Left, planItem.Right, *planItem.Value);
                 break;
             }
@@ -33,14 +44,6 @@ void StressTest(const size_t length, const size_t queryCount, std::function<TVal
     const auto testEndedAt = std::chrono::high_resolution_clock::now();
     const auto testDuration = std::chrono::duration_cast<std::chrono::milliseconds>(testEndedAt - testStartedAt);
     spdlog::info("Stress test passed. Time elapsed: {} ms", testDuration.count());
-}
-
-std::function<int64_t(std::mt19937&)> CreateRandomIntGenerator(const int64_t lower, const int64_t upper) {
-    return [lower, upper](std::mt19937& generator) {
-        static std::uniform_int_distribution<int64_t> valueDistribution(lower, upper);
-        auto value = valueDistribution(generator);
-        return value;
-    };
 }
 
 TEST(InMemoryStress, IntSmallRangeSum) {
@@ -89,4 +92,16 @@ TEST(InMemoryStress, IntRangeMin) {
 
 TEST(InMemoryStress, IntRangeMax) {
     StressTest<int64_t, int64_t, NProust::TMaxOperation>(1000, 1000000, CreateRandomIntGenerator(-100, 100));
+}
+
+TEST(InMemoryStress, DifferentLengths) {
+    // idempotent operation
+    for (size_t length = 1; length <= 100; ++length) {
+        StressTest<int64_t, int64_t, NProust::TMaxOperation>(length, 1000, CreateRandomIntGenerator(-100, 100));
+    }
+
+    // non-idempotent operation
+    for (size_t length = 1; length <= 100; ++length) {
+        StressTest<int64_t, int64_t, NProust::TSumOperation>(length, 1000, CreateRandomIntGenerator(-100, 100));
+    }
 }
