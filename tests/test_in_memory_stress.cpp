@@ -23,10 +23,13 @@ void StressTest(const size_t length, const size_t queryCount, std::function<TVal
     const auto testStartedAt = std::chrono::high_resolution_clock::now();
     auto robustEngine = NProust::CreateRobustEngine<TValue, TOperationResult, TOperation>();
     robustEngine->Init(length);
+
+    size_t queriesProcessed = 0;
     while (auto maybeItem = reader.NextQuery()) {
         if (!maybeItem.has_value()) {
             break;
         }
+        ++queriesProcessed;
         const auto planItem = *maybeItem;
         switch (planItem.Operation) {
             case NProust::EEngineOperation::SetRange: {
@@ -41,6 +44,8 @@ void StressTest(const size_t length, const size_t queryCount, std::function<TVal
             }
         }
     }
+
+    EXPECT_EQ(queriesProcessed, queryCount);
     const auto testEndedAt = std::chrono::high_resolution_clock::now();
     const auto testDuration = std::chrono::duration_cast<std::chrono::milliseconds>(testEndedAt - testStartedAt);
     spdlog::info("Stress test passed. Time elapsed: {} ms", testDuration.count());

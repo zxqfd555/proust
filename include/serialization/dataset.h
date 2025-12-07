@@ -40,8 +40,9 @@ namespace NProust {
             , OwnedOutput(std::make_unique<std::ofstream>(targetPath, std::ios::binary))
             , Output(*OwnedOutput)
         {
-            if (OwnedOutput) {
-                assert(OwnedOutput->is_open() && "Failed to create an output file");
+            if (OwnedOutput && !OwnedOutput->is_open()) {
+                spdlog::critical("Failed to create an output file");
+                std::terminate();
             }
             WriteHeader();
         }
@@ -58,7 +59,9 @@ namespace NProust {
         }
 
         void SaveQuery(const TItem& item) {
-            assert(QueriesProcessed++ < QueryCount && "The number of queries exceeds the initially specified one");
+            if (++QueriesProcessed > QueryCount) {
+                spdlog::error("The number of queries exceeds the initially specified one");
+            }
 
             uint8_t operation = static_cast<uint8_t>(item.Operation);
             WriteRaw(&operation, sizeof(operation));
@@ -118,6 +121,7 @@ namespace NProust {
         }
 
         void WriteRaw(const void* data, size_t sliceLength) {
+            spdlog::info("Writing {} bytes at position {} while the size is {}", sliceLength, BufferWritePosition, Buffer.size());
             const char* dataPtr = (const char*)data;
             while (sliceLength > 0) {
                 size_t remaining = Buffer.size() - BufferWritePosition;
@@ -134,12 +138,18 @@ namespace NProust {
         }
 
         void FlushBuffer(const bool isForced) {
+            spdlog::info("Writing {} bytes into the sink", BufferWritePosition);
             Output.write(Buffer.data(), BufferWritePosition);
             BufferWritePosition = 0;
             if (isForced) {
                 Output.flush();
+                spdlog::info("Forcibly flushing the data into sink");
             }
-            assert(Output.good() && "Stream record has failed");
+
+            if (!Output.good()) {
+                spdlog::critical("Stream record has failed");
+                std::terminate();
+            }
         }
     };
 
@@ -151,10 +161,13 @@ namespace NProust {
     public:
         TStreamingDatasetReader(const std::string& path)
             : Buffer(BUFFER_SIZE)
+            , OwnedInput(std::make_unique<std::ifstream>(path, std::ios::binary))
+            , Input(OwnedInput.get())
         {
-            OwnedInput = std::make_unique<std::ifstream>(path, std::ios::binary);
-            Input = OwnedInput.get();
-            assert(static_cast<std::ifstream*>(Input)->is_open());
+            if (OwnedInput && !OwnedInput->is_open()) {
+                spdlog::critical("Failed to open the dataset file");
+                std::terminate();
+            }
 
             ReadHeader();
         }
@@ -258,11 +271,11 @@ namespace NProust {
 
         void FillBuffer() {
             BufferReadPosition = 0;
-            Input.read(reinterpret_cast<char*>(Buffer.data()), Buffer.size());
+            Input.read(Buffer.data(), Buffer.size());
 
             BufferSize = static_cast<size_t>(Input.gcount());
             if (BufferSize == 0 && QueriesRead < QueryCount) {
-                std::cerr << "Unexpected end of file" << std::endl;
+                spdlog::critical("Unexpected end of file after the first {} queries", QueriesRead);
                 std::terminate();
             }
         }

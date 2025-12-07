@@ -3,6 +3,12 @@ find_package(GTest REQUIRED)
 
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    set(SANITIZER_FLAGS "-fsanitize=address,undefined,leak -fno-omit-frame-pointer -fsanitize-address-use-after-scope")
+    target_compile_options(${PROJECT_NAME} PRIVATE ${SANITIZER_FLAGS})
+    target_link_options(${PROJECT_NAME} PRIVATE ${SANITIZER_FLAGS})
+endif()
+
 add_executable(tests
     test_dataset_serialization.cpp
     test_in_memory_simple.cpp

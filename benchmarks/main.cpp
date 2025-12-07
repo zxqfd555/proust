@@ -56,6 +56,10 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    std::cerr << "Dataset type: " << datasetType << std::endl;
+    std::cerr << "Structure length: " << length << std::endl;
+    std::cerr << "Number of queries: " << queryCount << std::endl;
+    std::cerr << "Target file: " << outputFn << std::endl;
     if (datasetType == "sum_i32") {
         NProust::GenerateTestPlanIntoFile<int32_t, int32_t, NProust::TSumOperation>(length, queryCount, NProust::CreateRandomIntGenerator(-100, 100), outputFn);
     } else {
