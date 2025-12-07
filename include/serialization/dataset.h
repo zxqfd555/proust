@@ -159,7 +159,7 @@ namespace NProust {
         TStreamingDatasetReader(const std::string& path)
             : Buffer(BUFFER_SIZE)
             , OwnedInput(std::make_unique<std::ifstream>(path, std::ios::binary))
-            , Input(OwnedInput.get())
+            , Input(*OwnedInput)
         {
             if (OwnedInput && !OwnedInput->is_open()) {
                 spdlog::critical("Failed to open the dataset file");

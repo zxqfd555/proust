@@ -11,7 +11,7 @@
 
 using NProust::CreateRandomIntGenerator;
 
-template<typename TValue, typename TOperationResult, typename TOperation>
+template<typename TValue, typename TOperationResult, typename TOperation, NProust::NodeLayout TNodeLayout = NProust::TPreorderNodeLayout>
 void StressTest(const size_t length, const size_t queryCount, std::function<TValue(std::mt19937&)> valueGenerator) {
     std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
     NProust::TStreamingDatasetWriter<TValue, TOperationResult> writer(queryCount, length, stream);
@@ -21,7 +21,7 @@ void StressTest(const size_t length, const size_t queryCount, std::function<TVal
     NProust::TStreamingDatasetReader<TValue, TOperationResult> reader(stream);
 
     const auto testStartedAt = std::chrono::high_resolution_clock::now();
-    auto robustEngine = NProust::CreateRobustEngine<TValue, TOperationResult, TOperation>();
+    auto robustEngine = NProust::CreateRobustEngine<TValue, TOperationResult, TOperation, TNodeLayout>();
     robustEngine->Init(length);
 
     size_t queriesProcessed = 0;
@@ -108,5 +108,17 @@ TEST(InMemoryStress, DifferentLengths) {
     // non-idempotent operation
     for (size_t length = 1; length <= 100; ++length) {
         StressTest<int64_t, int64_t, NProust::TSumOperation>(length, 1000, CreateRandomIntGenerator(-100, 100));
+    }
+}
+
+TEST(InMemoryStress, DifferentLengthsWithHeapLayout) {
+    // idempotent operation
+    for (size_t length = 1; length <= 100; ++length) {
+        StressTest<int64_t, int64_t, NProust::TMaxOperation, NProust::TBinaryHeapNodeLayout>(length, 1000, CreateRandomIntGenerator(-100, 100));
+    }
+
+    // non-idempotent operation
+    for (size_t length = 1; length <= 100; ++length) {
+        StressTest<int64_t, int64_t, NProust::TSumOperation, NProust::TBinaryHeapNodeLayout>(length, 1000, CreateRandomIntGenerator(-100, 100));
     }
 }

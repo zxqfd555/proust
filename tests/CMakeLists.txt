@@ -9,6 +9,11 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         -fno-omit-frame-pointer
         -fsanitize-address-use-after-scope
     )
+elseif (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+    set(SANITIZER_FLAGS
+        /RTC1
+        /analyze
+    )
 endif()
 
 add_executable(tests
@@ -20,8 +25,11 @@ add_executable(tests
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(tests PRIVATE ${SANITIZER_FLAGS})
     target_link_options(tests PRIVATE ${SANITIZER_FLAGS})
+elseif (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+    target_compile_options(tests PRIVATE
+        $<$<CONFIG:Debug>:/RTC1 /analyze>
+    )
 endif()
-
 
 target_link_libraries(tests PRIVATE project_dependencies)
 target_link_libraries(tests PRIVATE GTest::gtest GTest::gtest_main)

@@ -1,4 +1,3 @@
-#include <cassert>
 #include <chrono>
 #include <iostream>
 #include <fstream>
@@ -7,7 +6,6 @@
 #include <span>
 
 #include "common/dataset.h"
-#include "engine/segtree/segtree.h"
 #include "engine/operations.h"
 #include "serialization/dataset.h"
 
