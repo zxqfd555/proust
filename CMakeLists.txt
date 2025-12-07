@@ -14,7 +14,6 @@ else()
         -march=native
         -ffast-math
         -flto
-        -fno-exceptions
         -fno-rtti
     )
 endif()

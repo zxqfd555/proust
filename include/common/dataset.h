@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <iostream>
+#include <optional>
 #include <random>
 
 #include <spdlog/spdlog.h>
