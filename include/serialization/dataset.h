@@ -223,7 +223,7 @@ namespace NProust {
         size_t Length;
         size_t QueriesRead = 0;
 
-        std::unique_ptr<std::istream> OwnedInput;
+        std::unique_ptr<std::ifstream> OwnedInput;
         std::istream& Input;
 
         std::vector<char> Buffer;

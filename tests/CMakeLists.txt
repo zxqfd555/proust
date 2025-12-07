@@ -4,9 +4,11 @@ find_package(GTest REQUIRED)
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    set(SANITIZER_FLAGS "-fsanitize=address,undefined,leak -fno-omit-frame-pointer -fsanitize-address-use-after-scope")
-    target_compile_options(${PROJECT_NAME} PRIVATE ${SANITIZER_FLAGS})
-    target_link_options(${PROJECT_NAME} PRIVATE ${SANITIZER_FLAGS})
+    set(SANITIZER_FLAGS
+        -fsanitize=address,undefined,leak
+        -fno-omit-frame-pointer
+        -fsanitize-address-use-after-scope
+    )
 endif()
 
 add_executable(tests
@@ -14,6 +16,12 @@ add_executable(tests
     test_in_memory_simple.cpp
     test_in_memory_stress.cpp
 )
+
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(tests PRIVATE ${SANITIZER_FLAGS})
+    target_link_options(tests PRIVATE ${SANITIZER_FLAGS})
+endif()
+
 
 target_link_libraries(tests PRIVATE project_dependencies)
 target_link_libraries(tests PRIVATE GTest::gtest GTest::gtest_main)
