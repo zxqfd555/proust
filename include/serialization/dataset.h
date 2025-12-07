@@ -52,8 +52,8 @@ namespace NProust {
             : QueryCount(queryCount)
             , Length(length)
             , Buffer(BUFFER_SIZE)
-            , Output(externalWriter)
             , OwnedOutput(nullptr)
+            , Output(externalWriter)
         {
             WriteHeader();
         }
@@ -98,8 +98,8 @@ namespace NProust {
     private:
         const size_t QueryCount;
         const size_t Length;
-        std::ostream& Output;
         std::unique_ptr<std::ofstream> OwnedOutput;
+        std::ostream& Output;
 
         size_t QueriesProcessed = 0;
 
@@ -121,7 +121,6 @@ namespace NProust {
         }
 
         void WriteRaw(const void* data, size_t sliceLength) {
-            spdlog::info("Writing {} bytes at position {} while the size is {}", sliceLength, BufferWritePosition, Buffer.size());
             const char* dataPtr = (const char*)data;
             while (sliceLength > 0) {
                 size_t remaining = Buffer.size() - BufferWritePosition;
@@ -138,12 +137,10 @@ namespace NProust {
         }
 
         void FlushBuffer(const bool isForced) {
-            spdlog::info("Writing {} bytes into the sink", BufferWritePosition);
             Output.write(Buffer.data(), BufferWritePosition);
             BufferWritePosition = 0;
             if (isForced) {
                 Output.flush();
-                spdlog::info("Forcibly flushing the data into sink");
             }
 
             if (!Output.good()) {
@@ -173,8 +170,8 @@ namespace NProust {
         }
 
         TStreamingDatasetReader(std::istream& externalReader)
-            : Input(externalReader)
-            , OwnedInput(nullptr)
+            : OwnedInput(nullptr)
+            , Input(externalReader)
             , Buffer(BUFFER_SIZE)
         {
             ReadHeader();
@@ -226,8 +223,8 @@ namespace NProust {
         size_t Length;
         size_t QueriesRead = 0;
 
-        std::istream& Input;
         std::unique_ptr<std::istream> OwnedInput;
+        std::istream& Input;
 
         std::vector<char> Buffer;
         size_t BufferSize = 0;
