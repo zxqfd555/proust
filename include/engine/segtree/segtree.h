@@ -26,20 +26,19 @@ namespace NProust {
 
         static size_t RightChild(const size_t nodeId, const size_t rangeLength) {
             // The node is the root of a tree for `rangeLength` elements.
-            // The left subtree of the node represents `L = rangeLength / 2` elements.
+            // The left subtree of the node represents `L = [rangeLength / 2]` elements.
             // The number of elements in a segment tree for a size `S` is always `2 * S - 1`,
             // (can be proven by induction).
             //
             // Then, the last node in the left subtree is `nodeId + [rangeLength / 2] * 2 - 1`.
-            // And the first node in the right subtree - the right son in this type of traversal,
+            // And the first node in the right subtree - the right child in this type of traversal,
             // is `nodeId + [rangeLength / 2] * 2`.
             //
-            // For even `rangeLength`, it's just `nodeId + rangeLength`.
+            // For an even `rangeLength`, it's just `nodeId + rangeLength`.
             // If the length is odd, `nodeId + rangeLength - 1`.
             //
-            // To avoid branching and be CPU-efficient, we can express it with binary operations:
-            // `nodeId + rangeLength - (rangeLength % 2)`, where base-2 arithmetic
-            // is just shift and AND.
+            // To avoid branching, we can express it as follows: `nodeId + rangeLength - (rangeLength % 2)`.
+            // The latter can be calculated via binary operations.
             return nodeId + (rangeLength & ~size_t(1));
         }
     };
@@ -58,7 +57,7 @@ namespace NProust {
         }
     };
 
-    template<typename TValue, typename TOperationResult, typename TOperation, NodeLayout TNodeLayout = TBinaryHeapNodeLayout>
+    template<typename TValue, typename TOperationResult, typename TOperation, NodeLayout TNodeLayout = TPreorderNodeLayout>
     class TSegmentTreeEngine: public IEngine<TValue, TOperationResult, TOperation> {
     public:
         virtual TVersion Init(const size_t length) override {
