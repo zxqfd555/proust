@@ -10,20 +10,49 @@
 #include "engine/operations.h"
 #include "serialization/dataset.h"
 
-// CPU affinity helpers
 #if defined(_WIN32)
-#define NOMINMAX
-#include <windows.h>
+    #define NOMINMAX
+    #include <windows.h>
+    #include <psapi.h>
 #elif defined(__linux__)
-#include <pthread.h>
-#include <sched.h>
+    #include <pthread.h>
+    #include <sched.h>
+    #include <sys/resource.h>
 #elif defined(__APPLE__)
-#include <pthread.h>
-#include <mach/thread_policy.h>
-#include <mach/mach.h>
+    #include <pthread.h>
+    #include <sys/resource.h>
+    #include <mach/thread_policy.h>
+    #include <mach/mach.h>
 #endif
 
-const size_t QUERY_BATCH_SIZE = 1000;
+#if defined(_MSC_VER)
+    #include <intrin.h>
+    #pragma intrinsic(__rdtsc)
+    #pragma intrinsic(__rdtscp)
+    #pragma intrinsic(__cpuid)
+#else
+    #include <x86intrin.h>
+#endif
+
+const double WARMUP_DATASET_SHARE = 0.05;
+const size_t QUERY_BATCH_SIZE = 100;
+const size_t MAX_CYCLES_PER_OPERATION = 10000000;
+
+struct TPercentile {
+    const size_t Numerator;
+    const size_t Denominator;
+    const std::string Name;
+};
+
+const std::vector<TPercentile> TARGET_PERCENTILES = {
+    {50, 100, "50"},
+    {85, 100, "85"},
+    {95, 100, "95"},
+    {99, 100, "99"},
+    {999, 1000, "99.9"},
+    {9999, 10000, "99.99"},
+    {99999, 100000, "99.999"},
+};
 
 struct TWeightedDurations {
     uint32_t BatchSize;
@@ -57,7 +86,38 @@ uint32_t CalculatePercentile(const std::vector<TWeightedDurations>& durations, c
     return std::numeric_limits<uint32_t>::max();
 }
 
-void PinExecutionThread(int core_id) {
+uint32_t CalculatePercentile(const std::vector<size_t>& buckets, const size_t numerator, const size_t denominator) {
+    assert(numerator <= denominator);
+
+    size_t totalCount = 0;
+    for (auto& element : buckets) {
+        totalCount += element;
+    }
+
+    size_t currentSum = 0;
+    for (size_t bucketIndex = 0; bucketIndex < buckets.size(); ++bucketIndex) {
+        currentSum += buckets[bucketIndex];
+        if (currentSum * denominator >= totalCount * numerator) {
+            return bucketIndex;
+        }
+    }
+
+    return std::numeric_limits<uint32_t>::max();
+}
+
+static inline uint64_t StartRDTSC() {
+    _mm_lfence();
+    return __rdtsc();
+}
+
+static inline uint64_t EndRDTSC() {
+    uint32_t aux;
+    uint64_t t = __rdtscp(&aux);
+    _mm_lfence();
+    return t;
+}
+
+void PinExecutionThread(int32_t core_id) {
 #if defined(_WIN32)
     DWORD_PTR mask = 1ULL << core_id;
     HANDLE hThread = GetCurrentThread();
@@ -81,19 +141,49 @@ void PinExecutionThread(int core_id) {
     thread_affinity_policy_data_t policy = { core_id + 1 };
     kern_return_t kr = thread_policy_set(thread, THREAD_AFFINITY_POLICY, (thread_policy_t)&policy, THREAD_AFFINITY_POLICY_COUNT);
     if (kr != KERN_SUCCESS) {
-        spdlog::error("Failed to set CPU affinity on Mac OS");
+        spdlog::error("Failed to set CPU affinity on MacOS");
     }
 #else
     #warning "CPU affinity not implemented on this platform"
 #endif
 }
 
+int64_t GetPeakMemoryUsageKB() {
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS pmc;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
+        return static_cast<long>(pmc.PeakWorkingSetSize / 1024);
+    }
+    spdlog::error("Failed to get peak used memory on Windows");
+    return -1;
+#elif defined(__linux__)
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        return usage.ru_maxrss;
+    }
+    spdlog::error("Failed to get peak used memory on Linux");
+    return -1;
+#elif defined(__APPLE__)
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        return usage.ru_maxrss / 1024;
+    }
+    spdlog::error("Failed to get peak used memory on MacOS");
+    return -1;
+#else
+    spdlog::error("Failed detect the platform");
+    return -1;
+#endif
+}
+
+
 template<class TValue, class TOperationResult, class TOperation>
 void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer) {
-    PinExecutionThread(0);
     std::vector<TWeightedDurations> weightedDurations;
+    std::vector<size_t> cyclesSetValue(MAX_CYCLES_PER_OPERATION, 0);
+    std::vector<size_t> cyclesComputeRange(MAX_CYCLES_PER_OPERATION, 0);
 
-    auto engine = NProust::CreateRobustEngine<TValue, TOperationResult, TOperation>();
+    auto engine = NProust::CreateRobustEngine<TValue, TOperationResult, TOperation, NProust::TPreorderNodeTopology<7>, NProust::TAoSLayout<TValue, TOperationResult>>();
     {
         const auto initStartedAt = std::chrono::high_resolution_clock::now();
         engine->Init(streamer.GetLength());
@@ -105,6 +195,7 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
     size_t readCount = 0;
     bool isDatasetExhausted = false;
     const auto runStartedAt = std::chrono::high_resolution_clock::now();
+    const auto warmupUntilEventId = (size_t)(WARMUP_DATASET_SHARE * streamer.GetQueryCount());
     while (!isDatasetExhausted) {
         std::vector<NProust::TTestPlanItem<TValue, TOperationResult>> datasetChunk;
         datasetChunk.reserve(QUERY_BATCH_SIZE);
@@ -116,20 +207,37 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
             }
             datasetChunk.emplace_back(std::move(*maybeItem));
             ++readCount;
+            if (readCount == warmupUntilEventId) {
+                // Make sure that no chunk is divided between the warmup and the benchmarking part.
+                break;
+            }
         }
         if (datasetChunk.empty()) {
             break;
         }
+        const bool warmupIsDone = warmupUntilEventId < readCount;
 
         const auto batchRunStartedAt = std::chrono::high_resolution_clock::now();
         for (const auto& planItem : datasetChunk) {
             switch (planItem.Operation) {
                 case NProust::EEngineOperation::SetRange: {
+                    const auto startCycle = StartRDTSC();
                     engine->SetRange(planItem.Left, planItem.Right, *planItem.Value);
+                    const auto endCycle = EndRDTSC();
+                    const auto totalCycles = std::min(endCycle - startCycle, MAX_CYCLES_PER_OPERATION - 1);
+                    if (warmupIsDone) {
+                        cyclesSetValue[totalCycles] += 1;
+                    }
                     break;
                 }
                 case NProust::EEngineOperation::Query: {
+                    const auto startCycle = StartRDTSC();
                     const auto result = engine->ComputeRange(planItem.Left, planItem.Right);
+                    const auto endCycle = EndRDTSC();
+                    const auto totalCycles = std::min(endCycle - startCycle, MAX_CYCLES_PER_OPERATION - 1);
+                    if (warmupIsDone) {
+                        cyclesComputeRange[totalCycles] += 1;
+                    }
                     if (result != *planItem.ExpectedResult) {
                         spdlog::critical("The implementation is incorrect: the benchmark doesn't make sense.");
                         std::terminate();
@@ -141,7 +249,9 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
         const auto batchRunFinishedAt = std::chrono::high_resolution_clock::now();
         const auto avgPerQueryInBatch = std::chrono::duration_cast<std::chrono::nanoseconds>(batchRunFinishedAt - batchRunStartedAt).count() / datasetChunk.size();
 
-        weightedDurations.emplace_back(datasetChunk.size(), avgPerQueryInBatch);
+        if (warmupIsDone) {
+            weightedDurations.emplace_back((uint32_t)datasetChunk.size(), (uint32_t)avgPerQueryInBatch);
+        }
     }
 
     const auto runFinishedAt = std::chrono::high_resolution_clock::now();
@@ -150,16 +260,45 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
     spdlog::info("The run has finished successfully. {} queries processed in {} ms ({} ns on average per query)", readCount, runTimeElapsed.count(), durationPerQuery);
 
     std::sort(weightedDurations.begin(), weightedDurations.end(), [](const auto& lhs, const auto& rhs) {return lhs.AvgDuration < rhs.AvgDuration;});
-    spdlog::info("Approximate percentile [50]: {} ns", CalculatePercentile(weightedDurations, 1, 2));
-    spdlog::info("Approximate percentile [85]: {} ns", CalculatePercentile(weightedDurations, 85, 100));
-    spdlog::info("Approximate percentile [95]: {} ns", CalculatePercentile(weightedDurations, 95, 100));
-    spdlog::info("Approximate percentile [99]: {} ns", CalculatePercentile(weightedDurations, 99, 100));
-    spdlog::info("Approximate percentile [99.9]: {} ns", CalculatePercentile(weightedDurations, 999, 1000));
-    spdlog::info("Approximate percentile [99.99]: {} ns", CalculatePercentile(weightedDurations, 9999, 10000));
-    spdlog::info("Approximate percentile [99.999]: {} ns", CalculatePercentile(weightedDurations, 99999, 100000));
+    spdlog::info("Peak memory usage: {} Kb", GetPeakMemoryUsageKB());
+    for (const auto& percentile : TARGET_PERCENTILES) {
+        spdlog::info("Approximate percentile [{}]: {} ns", percentile.Name, CalculatePercentile(weightedDurations, percentile.Numerator, percentile.Denominator));
+    }
+
+    // TSC usage is somehow controversial, but I still do that.
+    // Initially, in the earlier CPU architectures, it was used to measure the code performance
+    // in the CPU cycles. It was however frequently misused, because the people divided the TSC
+    // performance by the CPU frequency, which is wrong: the frequency of CPU is variable and
+    // depends on many factors (TurboBoost, power saving mode, idle periods, ...).
+    // Then, the TSC was adapted to be better used in the time measuring tasks: modern CPUs have
+    // the isolated power source for both computing and the TSC units. So now the TSC can also
+    // be uncoupled from the main computation flow.
+    //
+    // I still use it, because it the only was to see how modification and query behave relatively
+    // to each other: the overhead of __rdtsc is low nanoseconds, so we can query it on every operation
+    // and have reliable per-operation histograms. Not possible with a steady clock that works in
+    // high nanoseconds-low microseconds. Of course, you need to pin your execution to a single core
+    // to make sure that start and end counts are taken from a single source.
+    //
+    // So, you need to be aware of your CPU architecture to correctly interpret the results. Use the
+    // TSC cycles as a kind of an abstract time/performance units.
+    for (const auto& percentile : TARGET_PERCENTILES) {
+        spdlog::info("Modification percentile [{}]: {} TSC cycles", percentile.Name, CalculatePercentile(cyclesSetValue, percentile.Numerator, percentile.Denominator));
+    }
+    for (const auto& percentile : TARGET_PERCENTILES) {
+        spdlog::info("Query percentile [{}]: {} TSC cycles", percentile.Name, CalculatePercentile(cyclesComputeRange, percentile.Numerator, percentile.Denominator));
+    }
 }
 
 int main(int argc, char* argv[]) {
+    // The pin is needed for TSC usage that goes next, and also to reduce the number of
+    // process migrations between cores, which would be harmful, for example, because of the
+    // cold cache.
+    PinExecutionThread(0);
+
+    static_assert(std::chrono::high_resolution_clock::is_steady, "High resolution clock is not steady");
+    static_assert(std::chrono::high_resolution_clock::period::den, "High resolution clock doesn't have a nanosecond precision");
+
     std::span<char*> args(argv, argc);
 
     std::string datasetFn;

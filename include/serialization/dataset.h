@@ -177,6 +177,10 @@ namespace NProust {
             ReadHeader();
         }
 
+        size_t GetQueryCount() const {
+            return QueryCount;
+        }
+
         size_t GetLength() const {
             return Length;
         }

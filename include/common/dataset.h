@@ -22,7 +22,13 @@ namespace NProust {
     }
 
     template<typename TValue, typename TOperationResult, typename TOperation>
-    void GenerateTestPlan(const size_t length, const size_t queryCount, std::function<TValue(std::mt19937&)> valueGenerator, TStreamingDatasetWriter<TValue, TOperationResult>& target) {
+    void GenerateTestPlan(
+        const size_t length,
+        const size_t queryCount,
+        std::function<TValue(std::mt19937&)> valueGenerator,
+        TStreamingDatasetWriter<TValue, TOperationResult>& target,
+        std::unique_ptr<NProust::IEngine<TValue, TOperationResult, TOperation>> groundTruthEngine = nullptr
+    ) {
         const auto generationStartedAt = std::chrono::high_resolution_clock::now();
 
         std::mt19937 rng(std::random_device{}());
@@ -30,9 +36,11 @@ namespace NProust {
         std::uniform_int_distribution<int> leftDist(0, length - 1);
         std::uniform_int_distribution<int> rightDist(0, length);
 
-        auto naiveEngine = NProust::CreateNaiveEngine<TValue, TOperationResult, TOperation>();
+        if (!groundTruthEngine) {
+            groundTruthEngine = NProust::CreateNaiveEngine<TValue, TOperationResult, TOperation>();
+        }
 
-        naiveEngine->Init(length);
+        groundTruthEngine->Init(length);
         for (size_t querySeqIdx = 0; querySeqIdx < queryCount; ++querySeqIdx) {
             size_t left = leftDist(rng);
             size_t right = rightDist(rng);
@@ -44,7 +52,7 @@ namespace NProust {
             switch (operation) {
                 case EEngineOperation::SetRange: {
                     const auto value = valueGenerator(rng);
-                    naiveEngine->SetRange(left, right, value);
+                    groundTruthEngine->SetRange(left, right, value);
 
                     const auto item = TTestPlanItem<TValue, TOperationResult>(operation, left, right, value, std::nullopt);
                     target.SaveQuery(item);
@@ -54,7 +62,7 @@ namespace NProust {
                     if (left == right) {
                         right += 1;
                     }
-                    const auto expectedResult = naiveEngine->ComputeRange(left, right);
+                    const auto expectedResult = groundTruthEngine->ComputeRange(left, right);
 
                     const auto item = TTestPlanItem<TValue, TOperationResult>(operation, left, right, std::nullopt, expectedResult);
                     target.SaveQuery(item);

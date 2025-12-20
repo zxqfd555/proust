@@ -28,7 +28,7 @@ namespace NProust {
             return CurrentVersion;
         }
 
-        virtual TOperationResult ComputeRange(const size_t rangeStart, const size_t rangeEnd) override {
+        virtual TOperationResult ComputeRange(const size_t rangeStart, const size_t rangeEnd) const override {
             assert(rangeStart < rangeEnd && "The range start must be smaller than its end");
             assert(rangeStart != rangeEnd && "The operation result for an empty set is undefined");
             assert(rangeEnd <= Elements.size() && "The range goes beyond the allocated capacity");

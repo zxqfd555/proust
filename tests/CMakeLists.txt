@@ -1,8 +1,6 @@
 enable_testing()
 find_package(GTest REQUIRED)
 
-include_directories(${CMAKE_SOURCE_DIR}/include)
-
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     set(SANITIZER_FLAGS
         -fsanitize=address,undefined,leak
@@ -18,6 +16,7 @@ endif()
 
 add_executable(tests
     test_dataset_serialization.cpp
+    test_examples.cpp
     test_in_memory_simple.cpp
     test_in_memory_stress.cpp
 )
@@ -34,6 +33,7 @@ endif()
 target_link_libraries(tests PRIVATE project_dependencies)
 target_link_libraries(tests PRIVATE GTest::gtest GTest::gtest_main)
 target_include_directories(tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(tests PRIVATE ${CMAKE_SOURCE_DIR}/examples)
 
 include(GoogleTest)
 gtest_discover_tests(tests)

@@ -24,7 +24,7 @@ namespace NProust {
     public:
         virtual TVersion Init(const size_t length) = 0;
         virtual TVersion SetRange(const size_t left, const size_t right, const TValue& value) = 0;
-        virtual TOperationResult ComputeRange(const size_t left, const size_t right) = 0;
+        virtual TOperationResult ComputeRange(const size_t left, const size_t right) const = 0;
 
         virtual ~IEngine() = default;
     };

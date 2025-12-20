@@ -5,64 +5,28 @@
 #include <optional>
 
 #include "../interface.h"
+#include "layout.h"
+#include "topology.h"
 
 namespace NProust {
-    template <typename TLayout>
-    concept NodeLayout = requires(const TLayout layout, size_t nodeId, size_t rangeLength)
-    {
-        { layout.CapacityToReserve(rangeLength) } -> std::convertible_to<size_t>;
-        { layout.LeftChild(nodeId, rangeLength) } -> std::convertible_to<size_t>;
-        { layout.RightChild(nodeId, rangeLength) } -> std::convertible_to<size_t>;
-    };
-
-    struct TPreorderNodeLayout {
-        static size_t CapacityToReserve(const size_t rangeLength) {
-            return (rangeLength << 1);
-        }
-
-        static size_t LeftChild(const size_t nodeId, const size_t rangeLength) {
-            return nodeId + 1;
-        }
-
-        static size_t RightChild(const size_t nodeId, const size_t rangeLength) {
-            // The node is the root of a tree for `rangeLength` elements.
-            // The left subtree of the node represents `L = [rangeLength / 2]` elements.
-            // The number of elements in a segment tree for a size `S` is always `2 * S - 1`,
-            // (can be proven by induction).
-            //
-            // Then, the last node in the left subtree is `nodeId + [rangeLength / 2] * 2 - 1`.
-            // And the first node in the right subtree - the right child in this type of traversal,
-            // is `nodeId + [rangeLength / 2] * 2`.
-            //
-            // For an even `rangeLength`, it's just `nodeId + rangeLength`.
-            // If the length is odd, `nodeId + rangeLength - 1`.
-            //
-            // To avoid branching, we can express it as follows: `nodeId + rangeLength - (rangeLength % 2)`.
-            // The latter can be calculated via binary operations.
-            return nodeId + (rangeLength & ~size_t(1));
-        }
-    };
-
-    struct TBinaryHeapNodeLayout {
-        static size_t CapacityToReserve(const size_t rangeLength) {
-            return (rangeLength << 2);
-        }
-
-        static size_t LeftChild(const size_t nodeId, const size_t rangeLength) {
-            return (nodeId << 1) + 1;
-        }
-
-        static size_t RightChild(const size_t nodeId, const size_t rangeLength) {
-            return (nodeId << 1) + 2;
-        }
-    };
-
-    template<typename TValue, typename TOperationResult, typename TOperation, NodeLayout TNodeLayout = TPreorderNodeLayout>
+    template<
+        typename TValue,
+        typename TOperationResult,
+        typename TOperation,
+        NodeTopology TNodeTopology = TPreorderNodeTopology<0>,
+        typename TLayout = TSoALayout<TValue, TOperationResult>
+    >
+    requires DataLayout<TLayout, TValue, TOperationResult>
     class TSegmentTreeEngine: public IEngine<TValue, TOperationResult, TOperation> {
     public:
         virtual TVersion Init(const size_t length) override {
-            Nodes.resize(TNodeLayout::CapacityToReserve(length));
-            NodeCount = 0;
+            Nodes.ReserveCapacities(TNodeTopology::CapacityToReserve(length));
+            if (TNodeTopology::IsLeaf(2)) {
+                // If the leaf size is one, there is no need for an extra allocation.
+                LazySnapshot.resize(length);
+                TOperationResult defaultSnapshotValue = TOperation::template Repeat<TValue, TOperationResult>(TValue(), 1);
+                std::fill(LazySnapshot.begin(), LazySnapshot.end(), defaultSnapshotValue);
+            }
             AllocatedLength = length;
             return CurrentVersion++;
         }
@@ -78,7 +42,7 @@ namespace NProust {
             return CurrentVersion++;
         }
 
-        virtual TOperationResult ComputeRange(const size_t rangeStart, const size_t rangeEnd) override {
+        virtual TOperationResult ComputeRange(const size_t rangeStart, const size_t rangeEnd) const override {
             assert(rangeStart <= rangeEnd && "Range start can't be bigger than its end");
             assert(rangeStart != rangeEnd && "The operation result for an empty set is undefined");
             assert(rangeEnd <= AllocatedLength && "Range goes beyond the allocated length");
@@ -86,111 +50,151 @@ namespace NProust {
         }
 
     private:
-        struct TNode {
-            TOperationResult SubtreeValue;
-            std::optional<TValue> LazilyPropagated;
-
-            TNode() = default;
-
-            TNode(const size_t rangeLength)
-                : SubtreeValue(TOperation::template Repeat<TValue, TOperationResult>(TValue(), rangeLength))
-                , LazilyPropagated(std::nullopt)
-            {
-            }
-        };
-
+        TLayout Nodes;
+        std::vector<TOperationResult> LazySnapshot;
         size_t AllocatedLength = 0;
-        std::vector<TNode> Nodes;
-        size_t NodeCount = 0;
         TVersion CurrentVersion = 0;
 
-        void InitNodes(const size_t currentNodeId, const size_t nodeStart, const size_t nodeEnd) {
-            assert(currentNodeId < Nodes.size() && "There aren't enough pre-allocated nodes");
-            Nodes[currentNodeId] = TNode(nodeEnd - nodeStart);
+        inline void InitNodes(const size_t currentNodeId, const size_t nodeStart, const size_t nodeEnd) {
+            Nodes.SetSubtreeValue(currentNodeId, TOperation::Repeat(TValue(), nodeEnd - nodeStart));
+            Nodes.SetLazilyPropagated(currentNodeId, std::nullopt);
 
-            if (nodeStart + 1 < nodeEnd) {
+            if (!TNodeTopology::IsLeaf(nodeEnd - nodeStart)) {
                 const size_t rangeLength = nodeEnd - nodeStart;
                 const size_t midpoint = nodeStart + (rangeLength >> 1);
-                InitNodes(TNodeLayout::LeftChild(currentNodeId, rangeLength), nodeStart, midpoint);
-                InitNodes(TNodeLayout::RightChild(currentNodeId, rangeLength), midpoint, nodeEnd);
+                InitNodes(TNodeTopology::LeftChild(currentNodeId, rangeLength), nodeStart, midpoint);
+                InitNodes(TNodeTopology::RightChild(currentNodeId, rangeLength), midpoint, nodeEnd);
             }
         }
 
-        void ModifyNodes(const size_t nodeId, const size_t rangeStart, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd, const TValue& value) {
-            TNode& currentNode = Nodes[nodeId];
+        inline void ModifyNodes(const size_t nodeId, const size_t rangeStart, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd, const TValue& value) {
             if (rangeStart <= nodeStart && rangeEnd >= nodeEnd) {
-                currentNode.LazilyPropagated = value;
-                currentNode.SubtreeValue = TOperation::template Repeat<TValue, TOperationResult>(value, nodeEnd - nodeStart);
+                Nodes.SetLazilyPropagated(nodeId, value);
+                Nodes.SetSubtreeValue(nodeId, TOperation::template Repeat<TValue, TOperationResult>(value, nodeEnd - nodeStart));
                 return;
             }
 
-            if (Nodes[nodeId].LazilyPropagated.has_value()) {
-                Propagate(nodeId, nodeStart, nodeEnd);
-            }
-
-            const size_t midpoint = nodeStart + ((nodeEnd - nodeStart) >> 1);
-            const size_t leftChildId = TNodeLayout::LeftChild(nodeId, nodeEnd - nodeStart);
-            const size_t rightChildId = TNodeLayout::RightChild(nodeId, nodeEnd - nodeStart);
-            if (midpoint > rangeStart) {
-                ModifyNodes(leftChildId, rangeStart, rangeEnd, nodeStart, midpoint, value);
-            }
-            if (midpoint < rangeEnd) {
-                ModifyNodes(rightChildId, rangeStart, rangeEnd, midpoint, nodeEnd, value);
-            }
-            currentNode.SubtreeValue = TOperation::Merge(Nodes[leftChildId].SubtreeValue, Nodes[rightChildId].SubtreeValue);
-        }
-
-        void Propagate(const size_t nodeId, const size_t nodeStart, const size_t nodeEnd) {
-            TNode& currentNode = Nodes[nodeId];
-
-            // Asserting, but it must also be checked upstream, before calling propagation.
-            assert(currentNode.LazilyPropagated.has_value());
-            const TValue toPropagate = *currentNode.LazilyPropagated;
-
-            currentNode.LazilyPropagated = std::nullopt;
-            currentNode.SubtreeValue = TOperation::template Repeat<TValue, TOperationResult>(toPropagate, nodeEnd - nodeStart);
-            const size_t midpoint = nodeStart + ((nodeEnd - nodeStart) >> 1);
-
-            const size_t leftChildId = TNodeLayout::LeftChild(nodeId, nodeEnd - nodeStart);
-            const size_t rightChildId = TNodeLayout::RightChild(nodeId, nodeEnd - nodeStart);
-            Nodes[leftChildId].LazilyPropagated = toPropagate;
-            Nodes[leftChildId].SubtreeValue = TOperation::template Repeat<TValue, TOperationResult>(toPropagate, midpoint - nodeStart);
-            Nodes[rightChildId].LazilyPropagated = toPropagate;
-            Nodes[rightChildId].SubtreeValue = TOperation::template Repeat<TValue, TOperationResult>(toPropagate, nodeEnd - midpoint);
-        }
-
-        TOperationResult QueryNodes(const size_t nodeId, const size_t rangeStart, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd) {
-            const TNode& currentNode = Nodes[nodeId];
-            if (currentNode.LazilyPropagated.has_value()) {
+            const auto lazilyPropagated = Nodes.GetLazilyPropagated(nodeId);
+            if (TNodeTopology::IsLeaf(nodeEnd - nodeStart)) {
+                const TOperationResult modifyValue = TOperation::template Repeat<TValue, TOperationResult>(value, 1);
                 const size_t segmentStart = std::max(rangeStart, nodeStart);
                 const size_t segmentEnd = std::min(rangeEnd, nodeEnd);
-                return TOperation::template Repeat<TValue, TOperationResult>(*currentNode.LazilyPropagated, segmentEnd - segmentStart);
-            }
+                if (lazilyPropagated.has_value()) {
+                    const TOperationResult offcutValue = TOperation::template Repeat<TValue, TOperationResult>(*lazilyPropagated, 1);
+                    std::fill(LazySnapshot.begin() + nodeStart, LazySnapshot.begin() + segmentStart, offcutValue);
+                    std::fill(LazySnapshot.begin() + segmentStart, LazySnapshot.begin() + segmentEnd, modifyValue);
+                    std::fill(LazySnapshot.begin() + segmentEnd, LazySnapshot.begin() + nodeEnd, offcutValue);
+                    Nodes.SetLazilyPropagated(nodeId, std::nullopt);
 
-            if (rangeStart <= nodeStart && rangeEnd >= nodeEnd) {
-                return currentNode.SubtreeValue;
+                    const auto segmentValue = TOperation::template Repeat<TValue, TOperationResult>(value, segmentEnd - segmentStart);
+
+                    const auto toSegmentEnd = 
+                        segmentStart == nodeStart ? segmentValue :
+                        TOperation::Merge(TOperation::template Repeat<TValue, TOperationResult>(*lazilyPropagated, segmentStart - nodeStart), segmentValue);
+
+                    const auto nodeValue =
+                        segmentEnd == nodeEnd ? toSegmentEnd :
+                        TOperation::Merge(toSegmentEnd, TOperation::template Repeat<TValue, TOperationResult>(*lazilyPropagated, nodeEnd - segmentEnd));
+
+                    Nodes.SetSubtreeValue(nodeId, nodeValue);
+                } else {
+                    std::fill(LazySnapshot.begin() + segmentStart, LazySnapshot.begin() + segmentEnd, modifyValue);
+
+                    TOperationResult subtreeValue = LazySnapshot[nodeStart];
+                    if (segmentStart > nodeStart) {
+                        for (size_t index = nodeStart + 1; index < segmentStart; ++index) {
+                            subtreeValue = TOperation::Merge(subtreeValue, LazySnapshot[index]);
+                        }
+                        subtreeValue = TOperation::Merge(subtreeValue, TOperation::template Repeat<TValue, TOperationResult>(value, segmentEnd - segmentStart));
+                    } else {
+                        subtreeValue = TOperation::template Repeat<TValue, TOperationResult>(value, segmentEnd - segmentStart);
+                    }
+
+                    for (size_t index = segmentEnd; index < nodeEnd; ++index) {
+                        subtreeValue = TOperation::Merge(subtreeValue, LazySnapshot[index]);
+                    }
+
+                    Nodes.SetSubtreeValue(nodeId, subtreeValue);
+                }
+            } else {
+                if (lazilyPropagated.has_value()) {
+                    Propagate(nodeId, nodeStart, nodeEnd);
+                }
+                const size_t midpoint = nodeStart + ((nodeEnd - nodeStart) >> 1);
+                const size_t leftChildId = TNodeTopology::LeftChild(nodeId, nodeEnd - nodeStart);
+                const size_t rightChildId = TNodeTopology::RightChild(nodeId, nodeEnd - nodeStart);
+                if (midpoint > rangeStart) {
+                    ModifyNodes(leftChildId, rangeStart, rangeEnd, nodeStart, midpoint, value);
+                }
+                if (midpoint < rangeEnd) {
+                    ModifyNodes(rightChildId, rangeStart, rangeEnd, midpoint, nodeEnd, value);
+                }
+                Nodes.SetSubtreeValue(nodeId, TOperation::Merge(Nodes.GetSubtreeValue(leftChildId), Nodes.GetSubtreeValue(rightChildId)));
             }
+        }
+
+        inline void Propagate(const size_t nodeId, const size_t nodeStart, const size_t nodeEnd) {
+            const TValue toPropagate = *Nodes.GetLazilyPropagated(nodeId);
+
+            Nodes.SetLazilyPropagated(nodeId, std::nullopt);
 
             const size_t midpoint = nodeStart + ((nodeEnd - nodeStart) >> 1);
-            if (midpoint > rangeStart) {
-                const size_t leftChildId = TNodeLayout::LeftChild(nodeId, nodeEnd - nodeStart);
-                const TOperationResult leftResult = QueryNodes(leftChildId, rangeStart, rangeEnd, nodeStart, midpoint);
-                if (midpoint < rangeEnd) {
-                    const size_t rightChildId = TNodeLayout::RightChild(nodeId, nodeEnd - nodeStart);
-                    const TOperationResult rightResult = QueryNodes(rightChildId, rangeStart, rangeEnd, midpoint, nodeEnd);
-                    return TOperation::Merge(leftResult, rightResult);
-                } else {
-                    return leftResult;
-                }
+            const size_t leftChildId = TNodeTopology::LeftChild(nodeId, nodeEnd - nodeStart);
+            const size_t rightChildId = TNodeTopology::RightChild(nodeId, nodeEnd - nodeStart);
+
+            Nodes.SetLazilyPropagated(leftChildId, toPropagate);
+            Nodes.SetSubtreeValue(leftChildId, TOperation::template Repeat<TValue, TOperationResult>(toPropagate, midpoint - nodeStart));
+            Nodes.SetLazilyPropagated(rightChildId, toPropagate);
+            Nodes.SetSubtreeValue(rightChildId, TOperation::template Repeat<TValue, TOperationResult>(toPropagate, nodeEnd - midpoint));
+        }
+
+        inline TOperationResult QueryNodes(const size_t nodeId, const size_t rangeStart, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd) const {
+            if (rangeStart <= nodeStart && rangeEnd >= nodeEnd) {
+                return Nodes.GetSubtreeValue(nodeId);
             }
 
-            const size_t rightChildId = TNodeLayout::RightChild(nodeId, nodeEnd - nodeStart);
-            return QueryNodes(rightChildId, rangeStart, rangeEnd, midpoint, nodeEnd);
+            const size_t segmentStart = std::max(rangeStart, nodeStart);
+            const size_t segmentEnd = std::min(rangeEnd, nodeEnd);
+            const auto lazilyPropagated = Nodes.GetLazilyPropagated(nodeId);
+            if (lazilyPropagated.has_value()) {
+                return TOperation::template Repeat<TValue, TOperationResult>(*lazilyPropagated, segmentEnd - segmentStart);
+            }
+
+            if (TNodeTopology::IsLeaf(nodeEnd - nodeStart)) {
+                auto result = LazySnapshot[segmentStart];
+                for (size_t index = segmentStart + 1; index < segmentEnd; ++index) {
+                    result = TOperation::Merge(result, LazySnapshot[index]);
+                }
+                return result;
+            } else {
+                const size_t midpoint = nodeStart + ((nodeEnd - nodeStart) >> 1);
+                if (midpoint > rangeStart) {
+                    const size_t leftChildId = TNodeTopology::LeftChild(nodeId, nodeEnd - nodeStart);
+                    const TOperationResult leftResult = QueryNodes(leftChildId, rangeStart, rangeEnd, nodeStart, midpoint);
+                    if (midpoint < rangeEnd) {
+                        const size_t rightChildId = TNodeTopology::RightChild(nodeId, nodeEnd - nodeStart);
+                        const TOperationResult rightResult = QueryNodes(rightChildId, rangeStart, rangeEnd, midpoint, nodeEnd);
+                        return TOperation::Merge(leftResult, rightResult);
+                    } else {
+                        return leftResult;
+                    }
+                }
+
+                const size_t rightChildId = TNodeTopology::RightChild(nodeId, nodeEnd - nodeStart);
+                return QueryNodes(rightChildId, rangeStart, rangeEnd, midpoint, nodeEnd);
+            }
         }
     };
 
-    template<typename TValue, typename TOperationResult, typename TOperation, NodeLayout TNodeLayout = TPreorderNodeLayout>
+    template<
+        typename TValue,
+        typename TOperationResult,
+        typename TOperation,
+        NodeTopology TNodeTopology = TPreorderNodeTopology<0>,
+        typename TLayout = TSoALayout<TValue, TOperationResult>
+    >
+    requires DataLayout<TLayout, TValue, TOperationResult>
     std::unique_ptr<IEngine<TValue, TOperationResult, TOperation>> CreateRobustEngine() {
-        return std::make_unique<TSegmentTreeEngine<TValue, TOperationResult, TOperation, TNodeLayout>>();
+        return std::make_unique<TSegmentTreeEngine<TValue, TOperationResult, TOperation, TNodeTopology, TLayout>>();
     }
 } // namespace NProust
