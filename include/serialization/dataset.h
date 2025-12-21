@@ -5,6 +5,7 @@
 #include <spdlog/spdlog.h>
 
 #include "../common/query.h"
+#include "common.h"
 
 // TODO: This code won't work correctly if the endianness of the platform that was 
 // serializing the dataset and the one deserializing it are different. But I deliberately
@@ -16,9 +17,6 @@ namespace NProust {
     inline constexpr uint32_t CURRENT_VERSION = 1;
     inline constexpr size_t BUFFER_SIZE = 1 << 20; // 1 MB
 
-    template <typename T>
-    concept TriviallySerializable = std::is_trivially_copyable_v<T>;
-
     inline bool IsLittleEndianPlatform() {
         return std::endian::native == std::endian::little;
     }
@@ -27,7 +25,7 @@ namespace NProust {
     //
     // The data types must be trivially copyable to be memcpy-safe and avoid UB. 
     // We use memcpy, and expect that the write will be vectorized by AVX/SSE.
-    template<TriviallySerializable TValue, TriviallySerializable TOperationResult>
+    template<Serializable TValue, Serializable TOperationResult>
     class TStreamingDatasetWriter {
         using TItem = TTestPlanItem<TValue, TOperationResult>;
 
@@ -64,21 +62,11 @@ namespace NProust {
             }
 
             uint8_t operation = static_cast<uint8_t>(item.Operation);
-            WriteRaw(&operation, sizeof(operation));
-            WriteRaw(&item.Left, sizeof(item.Left));
-            WriteRaw(&item.Right, sizeof(item.Right));
-
-            const bool hasValue = item.Value.has_value();
-            WriteRaw(&hasValue, sizeof(hasValue));
-            if (hasValue) {
-                WriteRaw(&item.Value.value(), sizeof(TValue));
-            }
-
-            const bool hasExpectedResult = item.ExpectedResult.has_value();
-            WriteRaw(&hasExpectedResult, sizeof(hasExpectedResult));
-            if (hasExpectedResult) {
-                WriteRaw(&item.ExpectedResult.value(), sizeof(TOperationResult));
-            }
+            TTypeSerializer<decltype(operation)>::Write(*this, operation);
+            TTypeSerializer<decltype(item.Left)>::Write(*this, item.Left);
+            TTypeSerializer<decltype(item.Right)>::Write(*this, item.Right);
+            TTypeSerializer<decltype(item.Value)>::Write(*this, item.Value);
+            TTypeSerializer<decltype(item.ExpectedResult)>::Write(*this, item.ExpectedResult);
 
             if (QueriesProcessed == QueryCount) {
                 FlushBuffer(true);
@@ -135,6 +123,7 @@ namespace NProust {
                 }
             }
         }
+        template<typename T> friend struct TTypeSerializer;
 
         void FlushBuffer(const bool isForced) {
             Output.write(Buffer.data(), BufferWritePosition);
@@ -151,7 +140,7 @@ namespace NProust {
     };
 
     // Reader, mostly mirroring the implementation of TStreamingDatasetWriter
-    template<TriviallySerializable TValue, TriviallySerializable TOperationResult>
+    template<Serializable TValue, Serializable TOperationResult>
     class TStreamingDatasetReader {
         using TItem = TTestPlanItem<TValue, TOperationResult>;
 
@@ -193,31 +182,13 @@ namespace NProust {
             TItem item;
 
             uint8_t operation;
-            ReadRaw(&operation, sizeof(operation));
+            TTypeSerializer<decltype(operation)>::Read(*this, operation);
             item.Operation = static_cast<EEngineOperation>(operation);
 
-            ReadRaw(&item.Left, sizeof(item.Left));
-            ReadRaw(&item.Right, sizeof(item.Right));
-
-            bool hasValue;
-            ReadRaw(&hasValue, sizeof(hasValue));
-            if (hasValue) {
-                TValue value;
-                ReadRaw(&value, sizeof(TValue));
-                item.Value = value;
-            } else {
-                item.Value.reset();
-            }
-
-            bool hasExpectedResult;
-            ReadRaw(&hasExpectedResult, sizeof(hasExpectedResult));
-            if (hasExpectedResult) {
-                TOperationResult expectedResult;
-                ReadRaw(&expectedResult, sizeof(TOperationResult));
-                item.ExpectedResult = expectedResult;
-            } else {
-                item.ExpectedResult.reset();
-            }
+            TTypeSerializer<decltype(item.Left)>::Read(*this, item.Left);
+            TTypeSerializer<decltype(item.Right)>::Read(*this, item.Right);
+            TTypeSerializer<decltype(item.Value)>::Read(*this, item.Value);
+            TTypeSerializer<decltype(item.ExpectedResult)>::Read(*this, item.ExpectedResult);
 
             return item;
         }
@@ -269,6 +240,7 @@ namespace NProust {
                 sliceLength -= toCopy;
             }
         }
+        template<typename T> friend struct TTypeSerializer;
 
         void FillBuffer() {
             BufferReadPosition = 0;

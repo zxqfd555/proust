@@ -9,6 +9,8 @@
 #include "topology.h"
 
 namespace NProust {
+    const size_t ROOT_NODE_ID = 0;
+
     template<
         typename TValue,
         typename TOperationResult,
@@ -27,6 +29,7 @@ namespace NProust {
                 TOperationResult defaultSnapshotValue = TOperation::template Repeat<TValue, TOperationResult>(TValue(), 1);
                 std::fill(LazySnapshot.begin(), LazySnapshot.end(), defaultSnapshotValue);
             }
+            InitNodes(ROOT_NODE_ID, 0, length);
             AllocatedLength = length;
             return CurrentVersion++;
         }
@@ -55,8 +58,8 @@ namespace NProust {
         size_t AllocatedLength = 0;
         TVersion CurrentVersion = 0;
 
-        inline void InitNodes(const size_t currentNodeId, const size_t nodeStart, const size_t nodeEnd) {
-            Nodes.SetSubtreeValue(currentNodeId, TOperation::Repeat(TValue(), nodeEnd - nodeStart));
+        void InitNodes(const size_t currentNodeId, const size_t nodeStart, const size_t nodeEnd) {
+            Nodes.SetSubtreeValue(currentNodeId, TOperation::template Repeat<TValue, TOperationResult>(TValue(), nodeEnd - nodeStart));
             Nodes.SetLazilyPropagated(currentNodeId, std::nullopt);
 
             if (!TNodeTopology::IsLeaf(nodeEnd - nodeStart)) {
