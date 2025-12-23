@@ -47,13 +47,13 @@ namespace NProustExamples {
         }
     };
 
-    std::unique_ptr<NProust::IEngine<int32_t, TMaxSumState, TMaxSumStateOperation>> CreateMaxSumEngine() {
+    inline std::unique_ptr<NProust::IEngine<int32_t, TMaxSumState, TMaxSumStateOperation>> CreateMaxSumEngine() {
         return NProust::CreateRobustEngine<int32_t, TMaxSumState, TMaxSumStateOperation>();
     };
 
     // Not really needed for the task, but used it in a unit test when comparing the result against a
     // brute-force solution.
-    bool operator==(const NProustExamples::TMaxSumState& lhs, const NProustExamples::TMaxSumState& rhs) {
+    inline bool operator==(const NProustExamples::TMaxSumState& lhs, const NProustExamples::TMaxSumState& rhs) {
         return (
             lhs.MaxSubarraySum == rhs.MaxSubarraySum && 
             lhs.MaxPrefixSum == rhs.MaxPrefixSum &&

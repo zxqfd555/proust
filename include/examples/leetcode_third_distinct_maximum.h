@@ -48,7 +48,7 @@ namespace NProustExamples {
         }
     };
 
-    std::unique_ptr<NProust::IEngine<int32_t, TInverseOrderStatisticState, TInverseOrderStatisticOperation>> CreateInverseOrderStatisticsEngine() {
+    inline std::unique_ptr<NProust::IEngine<int32_t, TInverseOrderStatisticState, TInverseOrderStatisticOperation>> CreateInverseOrderStatisticsEngine() {
         return NProust::CreateRobustEngine<int32_t, TInverseOrderStatisticState, TInverseOrderStatisticOperation>();
     };
 } // namespace NProustExamples

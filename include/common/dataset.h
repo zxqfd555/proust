@@ -12,6 +12,16 @@
 #include "serialization/dataset.h"
 
 namespace NProust {
+    enum class EDatasetType {
+        SumInt32,
+        MaxInt32,
+        MaxSumInt32,
+        OrderStatistic16,
+    };
+
+    std::optional<EDatasetType> DatasetTypeFromString(const std::string_view& s);
+    void GenerateDataset(const EDatasetType type, size_t length, const size_t queryCount, const std::string fname);
+
     template<class TValue>
     std::function<TValue(std::mt19937&)> CreateRandomIntGenerator(const TValue lower, const TValue upper) {
         return [lower, upper](std::mt19937& generator) {
@@ -20,6 +30,9 @@ namespace NProust {
             return value;
         };
     }
+
+    // How many intermediate generation stages one wants to see in the logs.
+    const size_t GENERATION_LOG_FREQUENCY = 20;
 
     template<typename TValue, typename TOperationResult, typename TOperation>
     void GenerateTestPlan(
@@ -39,6 +52,8 @@ namespace NProust {
         if (!groundTruthEngine) {
             groundTruthEngine = NProust::CreateNaiveEngine<TValue, TOperationResult, TOperation>();
         }
+
+        const size_t intervalForLogging = GENERATION_LOG_FREQUENCY > 0 ? queryCount / GENERATION_LOG_FREQUENCY : queryCount + 1;
 
         groundTruthEngine->Init(length);
         for (size_t querySeqIdx = 0; querySeqIdx < queryCount; ++querySeqIdx) {
@@ -68,6 +83,10 @@ namespace NProust {
                     target.SaveQuery(item);
                     break;
                 }
+            }
+
+            if (querySeqIdx % intervalForLogging == 0) {
+                spdlog::info("Dataset generation: {}/{} entries are created (~{}%)", (querySeqIdx + 1), queryCount, ((querySeqIdx + 1) * 100 / queryCount));
             }
         }
         target.Finalize();

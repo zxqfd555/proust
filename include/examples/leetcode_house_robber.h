@@ -49,7 +49,7 @@ namespace NProustExamples {
         }
     };
 
-    std::unique_ptr<NProust::IEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation>> CreateLeetcodeHouseRobberEngine() {
+    inline std::unique_ptr<NProust::IEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation>> CreateLeetcodeHouseRobberEngine() {
         return NProust::CreateRobustEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation>();
     };
 } // namespace NProustExamples

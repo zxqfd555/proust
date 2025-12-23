@@ -2,5 +2,4 @@ add_executable(generate_dataset generate_dataset.cpp)
 add_executable(run_robust run_robust.cpp)
 
 target_link_libraries(generate_dataset PRIVATE project_dependencies)
-
 target_link_libraries(run_robust PRIVATE project_dependencies)

@@ -1,9 +1,9 @@
 #include <gtest/gtest.h>
 
 #include "common/dataset.h"
-#include "leetcode_house_robber.h"
-#include "leetcode_maximum_subarray.h"
-#include "leetcode_third_distinct_maximum.h"
+#include "examples/leetcode_house_robber.h"
+#include "examples/leetcode_maximum_subarray.h"
+#include "examples/leetcode_third_distinct_maximum.h"
 
 #include "utils.h"
 

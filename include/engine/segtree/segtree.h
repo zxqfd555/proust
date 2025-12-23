@@ -9,8 +9,6 @@
 #include "topology.h"
 
 namespace NProust {
-    const size_t ROOT_NODE_ID = 0;
-
     template<
         typename TValue,
         typename TOperationResult,
@@ -20,6 +18,9 @@ namespace NProust {
     >
     requires DataLayout<TLayout, TValue, TOperationResult>
     class TSegmentTreeEngine: public IEngine<TValue, TOperationResult, TOperation> {
+    private:
+        const size_t ROOT_NODE_ID = 0;
+
     public:
         virtual TVersion Init(const size_t length) override {
             Nodes.ReserveCapacities(TNodeTopology::CapacityToReserve(length));
@@ -39,7 +40,7 @@ namespace NProust {
             assert(rangeEnd <= AllocatedLength && "Range goes beyond the allocated length");
 
             if (rangeStart < rangeEnd) {
-                ModifyNodes(0, rangeStart, rangeEnd, 0, AllocatedLength, value);
+                ModifyNodes(ROOT_NODE_ID, rangeStart, rangeEnd, 0, AllocatedLength, value);
             }
 
             return CurrentVersion++;
@@ -49,7 +50,7 @@ namespace NProust {
             assert(rangeStart <= rangeEnd && "Range start can't be bigger than its end");
             assert(rangeStart != rangeEnd && "The operation result for an empty set is undefined");
             assert(rangeEnd <= AllocatedLength && "Range goes beyond the allocated length");
-            return QueryNodes(0, rangeStart, rangeEnd, 0, AllocatedLength);
+            return QueryNodes(ROOT_NODE_ID, rangeStart, rangeEnd, 0, AllocatedLength);
         }
 
     private:

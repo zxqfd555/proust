@@ -33,7 +33,6 @@ endif()
 target_link_libraries(tests PRIVATE project_dependencies)
 target_link_libraries(tests PRIVATE GTest::gtest GTest::gtest_main)
 target_include_directories(tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_include_directories(tests PRIVATE ${CMAKE_SOURCE_DIR}/examples)
 
 include(GoogleTest)
 gtest_discover_tests(tests)

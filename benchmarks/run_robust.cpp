@@ -6,9 +6,14 @@
 #include <span>
 #include <limits>
 
+#include "common/dataset.h"
 #include "engine/segtree/segtree.h"
 #include "engine/operations.h"
+#include "examples/leetcode_maximum_subarray.h"
+#include "examples/leetcode_third_distinct_maximum.h"
 #include "serialization/dataset.h"
+
+#include "args_parsing.h"
 
 #if defined(_WIN32)
     #define NOMINMAX
@@ -183,7 +188,7 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
     std::vector<size_t> cyclesSetValue(MAX_CYCLES_PER_OPERATION, 0);
     std::vector<size_t> cyclesComputeRange(MAX_CYCLES_PER_OPERATION, 0);
 
-    auto engine = NProust::CreateRobustEngine<TValue, TOperationResult, TOperation, NProust::TPreorderNodeTopology<7>, NProust::TAoSLayout<TValue, TOperationResult>>();
+    auto engine = NProust::CreateRobustEngine<TValue, TOperationResult, TOperation, NProust::TPreorderNodeTopology<6>, NProust::TAoSLayout<TValue, TOperationResult>>();
     {
         const auto initStartedAt = std::chrono::high_resolution_clock::now();
         engine->Init(streamer.GetLength());
@@ -301,38 +306,45 @@ int main(int argc, char* argv[]) {
 
     std::span<char*> args(argv, argc);
 
-    std::string datasetFn;
-    std::string datasetType;
+    std::optional<std::string> datasetFn;
+    std::optional<NProust::EDatasetType> datasetType;
 
     for (auto it = args.begin() + 1; it != args.end(); ++it) {
         std::string_view arg = *it;
-
-        if (arg == "--dataset-file") {
-            if (++it == args.end()) {
-                std::cerr << "--dataset-file requires a value" << std::endl;
-                return 1;
-            }
-            datasetFn = *it;
-        }
-        else if (arg == "--dataset-type") {
-            if (++it == args.end()) {
-                std::cerr << "--dataset-type requires a value" << std::endl;
-                return 1;
-            }
-            datasetType = *it;
-        }
-        else {
-            std::cerr << "Unknown argument: " << arg << std::endl;
-            return 1;
+        if (arg == DATASET_FILE_PARAM) {
+            ParseStringArgument(it, args.end(), datasetFn);
+        } else if (arg == DATASET_TYPE_PARAM) {
+            ParseDatasetTypeArgument(it, args.end(), datasetType);
+        } else {
+            spdlog::critical("Unknown argument: {}", arg);
+            std::terminate();
         }
     }
 
-    if (datasetType == "sum_i32") {
-        auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, int32_t>(datasetFn);
-        RunDataset<int32_t, int32_t, NProust::TSumOperation>(datasetStreamer);
-    } else {
-        std::cerr << "Unknown dataset type" << std::endl;
-        return 1;
+    CheckFieldPresence(DATASET_TYPE_PARAM, datasetType);
+    CheckFieldPresence(DATASET_FILE_PARAM, datasetFn);
+
+    switch (*datasetType) {
+        case NProust::EDatasetType::SumInt32: {
+            auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, int32_t>(*datasetFn);
+            RunDataset<int32_t, int32_t, NProust::TSumOperation>(datasetStreamer);
+            break;
+        }
+        case NProust::EDatasetType::MaxInt32: {
+            auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, int32_t>(*datasetFn);
+            RunDataset<int32_t, int32_t, NProust::TMaxOperation>(datasetStreamer);
+            break;
+        }
+        case NProust::EDatasetType::MaxSumInt32: {
+            auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, NProustExamples::TMaxSumState>(*datasetFn);
+            RunDataset<int32_t, NProustExamples::TMaxSumState, NProustExamples::TMaxSumStateOperation>(datasetStreamer);
+            break;
+        }
+        case NProust::EDatasetType::OrderStatistic16: {
+            auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, std::vector<int32_t>>(*datasetFn);
+            RunDataset<int32_t, std::vector<int32_t>, NProustExamples::TInverseOrderStatisticOperation>(datasetStreamer);
+            break;
+        }
     }
 
     return 0;
