@@ -16,7 +16,7 @@ namespace NProust {
         NodeTopology TNodeTopology = TPreorderNodeTopology<0>,
         typename TLayout = TSoALayout<TValue, TOperationResult>
     >
-    requires DataLayout<TLayout, TValue, TOperationResult>
+    //requires DataLayout<TLayout, TValue, TOperationResult>
     class TSegmentTreeEngine: public IEngine<TValue, TOperationResult, TOperation> {
     private:
         const size_t ROOT_NODE_ID = 0;
@@ -39,7 +39,7 @@ namespace NProust {
             assert(rangeStart <= rangeEnd && "Range start can't be bigger than its end");
             assert(rangeEnd <= AllocatedLength && "Range goes beyond the allocated length");
 
-            if (rangeStart < rangeEnd) {
+            if (rangeStart < rangeEnd) [[likely]] {
                 ModifyNodes(ROOT_NODE_ID, rangeStart, rangeEnd, 0, AllocatedLength, value);
             }
 
@@ -61,7 +61,7 @@ namespace NProust {
 
         void InitNodes(const size_t currentNodeId, const size_t nodeStart, const size_t nodeEnd) {
             Nodes.SetSubtreeValue(currentNodeId, TOperation::template Repeat<TValue, TOperationResult>(TValue(), nodeEnd - nodeStart));
-            Nodes.SetLazilyPropagated(currentNodeId, std::nullopt);
+            Nodes.DropLazilyPropagated(currentNodeId);
 
             if (!TNodeTopology::IsLeaf(nodeEnd - nodeStart)) {
                 const size_t rangeLength = nodeEnd - nodeStart;
@@ -78,29 +78,29 @@ namespace NProust {
                 return;
             }
 
-            const auto lazilyPropagated = Nodes.GetLazilyPropagated(nodeId);
-            if (TNodeTopology::IsLeaf(nodeEnd - nodeStart)) {
+            if (TNodeTopology::IsLeaf(nodeEnd - nodeStart)) [[unlikely]] {
                 const TOperationResult modifyValue = TOperation::template Repeat<TValue, TOperationResult>(value, 1);
                 const size_t segmentStart = std::max(rangeStart, nodeStart);
                 const size_t segmentEnd = std::min(rangeEnd, nodeEnd);
-                if (lazilyPropagated.has_value()) {
-                    const TOperationResult offcutValue = TOperation::template Repeat<TValue, TOperationResult>(*lazilyPropagated, 1);
+                if (Nodes.HasLazilyPropagated(nodeId)) {
+                    const auto lazilyPropagated = Nodes.GetLazilyPropagated(nodeId);
+                    const TOperationResult offcutValue = TOperation::template Repeat<TValue, TOperationResult>(lazilyPropagated, 1);
                     std::fill(LazySnapshot.begin() + nodeStart, LazySnapshot.begin() + segmentStart, offcutValue);
                     std::fill(LazySnapshot.begin() + segmentStart, LazySnapshot.begin() + segmentEnd, modifyValue);
                     std::fill(LazySnapshot.begin() + segmentEnd, LazySnapshot.begin() + nodeEnd, offcutValue);
-                    Nodes.SetLazilyPropagated(nodeId, std::nullopt);
+                    Nodes.DropLazilyPropagated(nodeId);
 
                     const auto segmentValue = TOperation::template Repeat<TValue, TOperationResult>(value, segmentEnd - segmentStart);
 
                     const auto toSegmentEnd = 
                         segmentStart == nodeStart ? segmentValue :
-                        TOperation::Merge(TOperation::template Repeat<TValue, TOperationResult>(*lazilyPropagated, segmentStart - nodeStart), segmentValue);
+                        TOperation::Merge(TOperation::template Repeat<TValue, TOperationResult>(lazilyPropagated, segmentStart - nodeStart), segmentValue);
 
-                    const auto nodeValue =
+                    auto nodeValue =
                         segmentEnd == nodeEnd ? toSegmentEnd :
-                        TOperation::Merge(toSegmentEnd, TOperation::template Repeat<TValue, TOperationResult>(*lazilyPropagated, nodeEnd - segmentEnd));
+                        TOperation::Merge(toSegmentEnd, TOperation::template Repeat<TValue, TOperationResult>(lazilyPropagated, nodeEnd - segmentEnd));
 
-                    Nodes.SetSubtreeValue(nodeId, nodeValue);
+                    Nodes.SetSubtreeValue(nodeId, std::move(nodeValue));
                 } else {
                     std::fill(LazySnapshot.begin() + segmentStart, LazySnapshot.begin() + segmentEnd, modifyValue);
 
@@ -118,10 +118,10 @@ namespace NProust {
                         subtreeValue = TOperation::Merge(subtreeValue, LazySnapshot[index]);
                     }
 
-                    Nodes.SetSubtreeValue(nodeId, subtreeValue);
+                    Nodes.SetSubtreeValue(nodeId, std::move(subtreeValue));
                 }
             } else {
-                if (lazilyPropagated.has_value()) {
+                if (Nodes.HasLazilyPropagated(nodeId)) {
                     Propagate(nodeId, nodeStart, nodeEnd);
                 }
                 const size_t midpoint = nodeStart + ((nodeEnd - nodeStart) >> 1);
@@ -138,9 +138,9 @@ namespace NProust {
         }
 
         inline void Propagate(const size_t nodeId, const size_t nodeStart, const size_t nodeEnd) {
-            const TValue toPropagate = *Nodes.GetLazilyPropagated(nodeId);
+            TValue toPropagate = Nodes.GetLazilyPropagated(nodeId);
 
-            Nodes.SetLazilyPropagated(nodeId, std::nullopt);
+            Nodes.DropLazilyPropagated(nodeId);
 
             const size_t midpoint = nodeStart + ((nodeEnd - nodeStart) >> 1);
             const size_t leftChildId = TNodeTopology::LeftChild(nodeId, nodeEnd - nodeStart);
@@ -148,8 +148,10 @@ namespace NProust {
 
             Nodes.SetLazilyPropagated(leftChildId, toPropagate);
             Nodes.SetSubtreeValue(leftChildId, TOperation::template Repeat<TValue, TOperationResult>(toPropagate, midpoint - nodeStart));
-            Nodes.SetLazilyPropagated(rightChildId, toPropagate);
+
+            // Inverse order since we want to further move toPropagate
             Nodes.SetSubtreeValue(rightChildId, TOperation::template Repeat<TValue, TOperationResult>(toPropagate, nodeEnd - midpoint));
+            Nodes.SetLazilyPropagated(rightChildId, std::move(toPropagate));
         }
 
         inline TOperationResult QueryNodes(const size_t nodeId, const size_t rangeStart, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd) const {
@@ -157,14 +159,16 @@ namespace NProust {
                 return Nodes.GetSubtreeValue(nodeId);
             }
 
-            const size_t segmentStart = std::max(rangeStart, nodeStart);
-            const size_t segmentEnd = std::min(rangeEnd, nodeEnd);
-            const auto lazilyPropagated = Nodes.GetLazilyPropagated(nodeId);
-            if (lazilyPropagated.has_value()) {
-                return TOperation::template Repeat<TValue, TOperationResult>(*lazilyPropagated, segmentEnd - segmentStart);
+            if (Nodes.HasLazilyPropagated(nodeId)) {
+                const auto lazilyPropagated = Nodes.GetLazilyPropagated(nodeId);
+                const size_t segmentStart = std::max(rangeStart, nodeStart);
+                const size_t segmentEnd = std::min(rangeEnd, nodeEnd);
+                return TOperation::template Repeat<TValue, TOperationResult>(lazilyPropagated, segmentEnd - segmentStart);
             }
 
             if (TNodeTopology::IsLeaf(nodeEnd - nodeStart)) {
+                const size_t segmentStart = std::max(rangeStart, nodeStart);
+                const size_t segmentEnd = std::min(rangeEnd, nodeEnd);
                 auto result = LazySnapshot[segmentStart];
                 for (size_t index = segmentStart + 1; index < segmentEnd; ++index) {
                     result = TOperation::Merge(result, LazySnapshot[index]);
@@ -197,7 +201,7 @@ namespace NProust {
         NodeTopology TNodeTopology = TPreorderNodeTopology<0>,
         typename TLayout = TSoALayout<TValue, TOperationResult>
     >
-    requires DataLayout<TLayout, TValue, TOperationResult>
+    //requires DataLayout<TLayout, TValue, TOperationResult>
     std::unique_ptr<IEngine<TValue, TOperationResult, TOperation>> CreateRobustEngine() {
         return std::make_unique<TSegmentTreeEngine<TValue, TOperationResult, TOperation, TNodeTopology, TLayout>>();
     }

@@ -181,14 +181,74 @@ int64_t GetPeakMemoryUsageKB() {
 #endif
 }
 
-
 template<class TValue, class TOperationResult, class TOperation>
+void RunDatasetWithSettings(
+    NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer,
+    const NProust::EDataLayout layout,
+    const NProust::ENodeTopology topology,
+    const size_t leafSizeLog
+) {
+    switch (layout) {
+        case NProust::EDataLayout::AoS: {
+            DispatchTopologyAndRun<TValue, TOperationResult, TOperation, NProust::TAoSLayout<TValue, TOperationResult>>(streamer, topology, leafSizeLog);
+            break;
+        }
+        case NProust::EDataLayout::SoA: {
+            DispatchTopologyAndRun<TValue, TOperationResult, TOperation, NProust::TSoALayout<TValue, TOperationResult>>(streamer, topology, leafSizeLog);
+            break;
+        }
+    }
+}
+
+template<class TValue, class TOperationResult, class TOperation, /*NProust::DataLayout<TValue, TOperationResult>*/class TDataLayout>
+void DispatchTopologyAndRun(
+    NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer,
+    NProust::ENodeTopology topology,
+    size_t leafSizeLog
+) {
+    switch (leafSizeLog) {
+        case 0: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 0>(streamer, topology); break;
+        case 1: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 1>(streamer, topology); break;
+        case 2: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 2>(streamer, topology); break;
+        case 3: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 3>(streamer, topology); break;
+        case 4: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 4>(streamer, topology); break;
+        case 5: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 5>(streamer, topology); break;
+        case 6: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 6>(streamer, topology); break;
+        case 7: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 7>(streamer, topology); break;
+        case 8: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 8>(streamer, topology); break;
+        case 9: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 9>(streamer, topology); break;
+        case 10: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 10>(streamer, topology); break;
+        default: {
+            spdlog::critical("Unsupported value of {}: {}", LEAF_SIZE_LOG_PARAM, leafSizeLog);
+            std::terminate();
+        }
+    }
+}
+
+template<class TValue, class TOperationResult, class TOperation, /*NProust::DataLayout<TValue, TOperationResult>*/class TDataLayout, size_t LeafSizeLog>
+void RunWithDispatchedTopology(
+    NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer,
+    const NProust::ENodeTopology topology
+) {
+    switch (topology) {
+        case NProust::ENodeTopology::BinaryHeap: {
+            RunDataset<TValue, TOperationResult, TOperation, TDataLayout, NProust::TBinaryHeapNodeTopology<LeafSizeLog>>(streamer);
+            break;
+        }
+        case NProust::ENodeTopology::Preorder: {
+            RunDataset<TValue, TOperationResult, TOperation, TDataLayout, NProust::TPreorderNodeTopology<LeafSizeLog>>(streamer);
+            break;
+        }
+    }
+}
+
+template<class TValue, class TOperationResult, class TOperation, /*NProust::DataLayout<TValue, TOperationResult>*/class TDataLayout, NProust::NodeTopology TNodeTopology>
 void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer) {
     std::vector<TWeightedDurations> weightedDurations;
     std::vector<size_t> cyclesSetValue(MAX_CYCLES_PER_OPERATION, 0);
     std::vector<size_t> cyclesComputeRange(MAX_CYCLES_PER_OPERATION, 0);
 
-    auto engine = NProust::CreateRobustEngine<TValue, TOperationResult, TOperation, NProust::TPreorderNodeTopology<6>, NProust::TAoSLayout<TValue, TOperationResult>>();
+    auto engine = NProust::CreateRobustEngine<TValue, TOperationResult, TOperation, TNodeTopology, TDataLayout>();
     {
         const auto initStartedAt = std::chrono::high_resolution_clock::now();
         engine->Init(streamer.GetLength());
@@ -280,7 +340,7 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
     // be uncoupled from the main computation flow.
     //
     // I still use it, because it the only was to see how modification and query behave relatively
-    // to each other: the overhead of __rdtsc is low nanoseconds, so we can query it on every operation
+    // to each other: the overhead of __rdtsc are low nanoseconds, so we can query it on every operation
     // and have reliable per-operation histograms. Not possible with a steady clock that works in
     // high nanoseconds-low microseconds. Of course, you need to pin your execution to a single core
     // to make sure that start and end counts are taken from a single source.
@@ -308,6 +368,9 @@ int main(int argc, char* argv[]) {
 
     std::optional<std::string> datasetFn;
     std::optional<NProust::EDatasetType> datasetType;
+    std::optional<NProust::EDataLayout> dataLayout;
+    std::optional<NProust::ENodeTopology> nodeTopology;
+    std::optional<size_t> leafSizeLog;
 
     for (auto it = args.begin() + 1; it != args.end(); ++it) {
         std::string_view arg = *it;
@@ -315,6 +378,12 @@ int main(int argc, char* argv[]) {
             ParseStringArgument(it, args.end(), datasetFn);
         } else if (arg == DATASET_TYPE_PARAM) {
             ParseDatasetTypeArgument(it, args.end(), datasetType);
+        } else if (arg == DATA_LAYOUT_PARAM) {
+            ParseDataLayoutArgument(it, args.end(), dataLayout);
+        } else if (arg == NODE_TOPOLOGY_PARAM) {
+            ParseNodeTopologyArgument(it, args.end(), nodeTopology);
+        } else if (arg == LEAF_SIZE_LOG_PARAM) {
+            ParseIntegralArgument(it, args.end(), leafSizeLog);
         } else {
             spdlog::critical("Unknown argument: {}", arg);
             std::terminate();
@@ -323,26 +392,39 @@ int main(int argc, char* argv[]) {
 
     CheckFieldPresence(DATASET_TYPE_PARAM, datasetType);
     CheckFieldPresence(DATASET_FILE_PARAM, datasetFn);
+    CheckFieldPresence(DATA_LAYOUT_PARAM, dataLayout);
+    CheckFieldPresence(NODE_TOPOLOGY_PARAM, nodeTopology);
+    CheckFieldPresence(LEAF_SIZE_LOG_PARAM, leafSizeLog);
 
     switch (*datasetType) {
         case NProust::EDatasetType::SumInt32: {
             auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, int32_t>(*datasetFn);
-            RunDataset<int32_t, int32_t, NProust::TSumOperation>(datasetStreamer);
+            RunDatasetWithSettings<int32_t, int32_t, NProust::TSumOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog);
             break;
         }
         case NProust::EDatasetType::MaxInt32: {
             auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, int32_t>(*datasetFn);
-            RunDataset<int32_t, int32_t, NProust::TMaxOperation>(datasetStreamer);
+            RunDatasetWithSettings<int32_t, int32_t, NProust::TMaxOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog);
             break;
         }
         case NProust::EDatasetType::MaxSumInt32: {
             auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, NProustExamples::TMaxSumState>(*datasetFn);
-            RunDataset<int32_t, NProustExamples::TMaxSumState, NProustExamples::TMaxSumStateOperation>(datasetStreamer);
+            RunDatasetWithSettings<int32_t, NProustExamples::TMaxSumState, NProustExamples::TMaxSumStateOperation>(
+                datasetStreamer,
+                *dataLayout,
+                *nodeTopology,
+                *leafSizeLog
+            );
             break;
         }
         case NProust::EDatasetType::OrderStatistic16: {
             auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, std::vector<int32_t>>(*datasetFn);
-            RunDataset<int32_t, std::vector<int32_t>, NProustExamples::TInverseOrderStatisticOperation>(datasetStreamer);
+            RunDatasetWithSettings<int32_t, std::vector<int32_t>, NProustExamples::TInverseOrderStatisticOperation<16>>(
+                datasetStreamer,
+                *dataLayout,
+                *nodeTopology,
+                *leafSizeLog
+            );
             break;
         }
     }

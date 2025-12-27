@@ -3,73 +3,73 @@
 namespace NProust {
     struct TSumOperation {
         template<typename TValue, typename TOperationResult>
-        static TOperationResult Repeat(const TValue& v, const size_t times) {
+        static TOperationResult Repeat(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v * times))) {
             return TOperationResult(v * times);
         }
 
         template<typename TOperationResult>
-        static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) {
+        static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) noexcept(noexcept(lhs + rhs)) {
             return lhs + rhs;
         }
     };
 
     struct TBitwiseAndOperation {
         template<typename TValue, typename TOperationResult>
-        static TOperationResult Repeat(const TValue& v, const size_t times) {
+        static TOperationResult Repeat(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v))) {
             return TOperationResult(v);
         }
 
         template<typename TOperationResult>
-        static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) {
+        static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) noexcept(noexcept(lhs & rhs)) {
             return lhs & rhs;
         }
     };
 
     struct TBitwiseOrOperation {
         template<typename TValue, typename TOperationResult>
-        static TOperationResult Repeat(const TValue& v, const size_t times) {
+        static TOperationResult Repeat(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v))) {
             return TOperationResult(v);
         }
 
         template<typename TOperationResult>
-        static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) {
+        static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) noexcept(noexcept(lhs | rhs)) {
             return lhs | rhs;
         }
     };
 
     struct TBitwiseXorOperation {
         template<typename TValue, typename TOperationResult>
-        static TOperationResult Repeat(const TValue& v, const size_t times) {
-            return times % 2 ? TOperationResult(v) : TOperationResult(0);
+        static TOperationResult Repeat(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v)) && noexcept(TOperationResult(0))) {
+            return (times & 1) ? TOperationResult(v) : TOperationResult(0);
         }
 
         template<typename TOperationResult>
-        static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) {
+        static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) noexcept(noexcept(lhs ^ rhs)) {
             return lhs ^ rhs;
         }
     };
 
     struct TMaxOperation {
         template<typename TValue, typename TOperationResult>
-        static TOperationResult Repeat(const TValue& v, const size_t times) {
+        static TOperationResult Repeat(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v))) {
             return TOperationResult(v);
         }
 
         template<typename TOperationResult>
-        static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) {
-            return std::max(lhs, rhs);
+        static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) noexcept(noexcept(lhs > rhs)) {
+            return lhs > rhs ? lhs : rhs;
         }
     };
 
     struct TMinOperation {
         template<typename TValue, typename TOperationResult>
-        static TOperationResult Repeat(const TValue& v, const size_t times) {
+        static TOperationResult Repeat(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v))) {
             return TOperationResult(v);
         }
 
         template<typename TOperationResult>
-        static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) {
-            return std::min(lhs, rhs);
+        static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) noexcept(noexcept(lhs < rhs)) {
+            return lhs < rhs ? lhs : rhs;
         }
     };
 } // namespace NProust

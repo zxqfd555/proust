@@ -19,7 +19,7 @@ namespace NProust {
         OrderStatistic16,
     };
 
-    std::optional<EDatasetType> DatasetTypeFromString(const std::string_view& s);
+    std::optional<EDatasetType> DatasetTypeFromString(const std::string_view s);
     void GenerateDataset(const EDatasetType type, size_t length, const size_t queryCount, const std::string fname);
 
     template<class TValue>
@@ -42,8 +42,6 @@ namespace NProust {
         TStreamingDatasetWriter<TValue, TOperationResult>& target,
         std::unique_ptr<NProust::IEngine<TValue, TOperationResult, TOperation>> groundTruthEngine = nullptr
     ) {
-        const auto generationStartedAt = std::chrono::high_resolution_clock::now();
-
         std::mt19937 rng(std::random_device{}());
         std::uniform_int_distribution<int> opDist(0, 1);
         std::uniform_int_distribution<int> leftDist(0, length - 1);
@@ -53,9 +51,9 @@ namespace NProust {
             groundTruthEngine = NProust::CreateNaiveEngine<TValue, TOperationResult, TOperation>();
         }
 
-        const size_t intervalForLogging = GENERATION_LOG_FREQUENCY > 0 ? queryCount / GENERATION_LOG_FREQUENCY : queryCount + 1;
-
         groundTruthEngine->Init(length);
+        const size_t intervalForLogging = queryCount / (GENERATION_LOG_FREQUENCY + 1) + 1;
+        const auto generationStartedAt = std::chrono::high_resolution_clock::now();
         for (size_t querySeqIdx = 0; querySeqIdx < queryCount; ++querySeqIdx) {
             size_t left = leftDist(rng);
             size_t right = rightDist(rng);
@@ -85,8 +83,18 @@ namespace NProust {
                 }
             }
 
-            if (querySeqIdx % intervalForLogging == 0) {
-                spdlog::info("Dataset generation: {}/{} entries are created (~{}%)", (querySeqIdx + 1), queryCount, ((querySeqIdx + 1) * 100 / queryCount));
+            if (querySeqIdx > 0 && querySeqIdx % (intervalForLogging + 1) == 0) {
+                const auto intermediateTimestamp = std::chrono::high_resolution_clock::now();
+                const auto speedPerQuery = std::chrono::duration_cast<std::chrono::nanoseconds>(intermediateTimestamp - generationStartedAt) / (querySeqIdx + 1);
+                const auto estimation = speedPerQuery * (queryCount - querySeqIdx - 1);
+
+                spdlog::info(
+                    "Dataset generation: {}/{} entries are created (~{}%). Estimated remaining time: {} minutes",
+                    (querySeqIdx + 1),
+                    queryCount,
+                    ((querySeqIdx + 1) * 100 / queryCount),
+                    std::chrono::duration_cast<std::chrono::minutes>(estimation).count()
+                );
             }
         }
         target.Finalize();
@@ -97,14 +105,26 @@ namespace NProust {
     }
 
     template<typename TValue, typename TOperationResult, typename TOperation>
-    void GenerateTestPlanIntoFile(const size_t length, const size_t queryCount, std::function<TValue(std::mt19937&)> valueGenerator, const std::string& targetPath) {
+    void GenerateTestPlanIntoFile(
+        const size_t length,
+        const size_t queryCount,
+        std::function<TValue(std::mt19937&)> valueGenerator,
+        const std::string& targetPath,
+        std::unique_ptr<NProust::IEngine<TValue, TOperationResult, TOperation>> groundTruthEngine = nullptr
+    ) {
         auto streamer = TStreamingDatasetWriter<TValue, TOperationResult>(queryCount, length, targetPath);
-        GenerateTestPlan<TValue, TOperationResult, TOperation>(length, queryCount, valueGenerator, streamer);
+        GenerateTestPlan<TValue, TOperationResult, TOperation>(length, queryCount, valueGenerator, streamer, std::move(groundTruthEngine));
     }
 
     template<typename TValue, typename TOperationResult, typename TOperation>
-    void GenerateTestPlanIntoOstream(const size_t length, const size_t queryCount, std::function<TValue(std::mt19937&)> valueGenerator, std::ostream& target) {
+    void GenerateTestPlanIntoOstream(
+        const size_t length,
+        const size_t queryCount,
+        std::function<TValue(std::mt19937&)> valueGenerator,
+        std::ostream& target,
+        std::unique_ptr<NProust::IEngine<TValue, TOperationResult, TOperation>> groundTruthEngine = nullptr
+    ) {
         auto streamer = TStreamingDatasetWriter<TValue, TOperationResult>(queryCount, length, target);
-        GenerateTestPlan<TValue, TOperationResult, TOperation>(length, queryCount, valueGenerator, streamer);
+        GenerateTestPlan<TValue, TOperationResult, TOperation>(length, queryCount, valueGenerator, streamer, std::move(groundTruthEngine));
     }
 } // namespace NProust

@@ -1,6 +1,29 @@
 #pragma once
 
+#include <optional>
+#include <vector>
+#include <concepts>
+#include <cstddef>
+
 namespace NProust {
+    constexpr std::string_view PREORDER_LAYOUT_NAME = "preorder";
+    constexpr std::string_view BINARY_HEAP_LAYOUT_NAME = "heap";
+
+    enum class ENodeTopology {
+        Preorder,
+        BinaryHeap,
+    };
+
+    [[nodiscard]] inline std::optional<ENodeTopology> NodeTopologyFromString(const std::string_view s) {
+        if (s == PREORDER_LAYOUT_NAME) {
+            return ENodeTopology::Preorder;
+        }
+        if (s == BINARY_HEAP_LAYOUT_NAME) {
+            return ENodeTopology::BinaryHeap;
+        }
+        return std::nullopt;
+    }
+
     template <typename TTopology>
     concept NodeTopology = requires(const TTopology layout, size_t nodeId, size_t rangeLength) {
         { layout.CapacityToReserve(rangeLength) } -> std::convertible_to<size_t>;
@@ -13,32 +36,28 @@ namespace NProust {
     struct TPreorderNodeTopology {
         static constexpr size_t LeafSize = size_t(1) << LeafSizeLog;
 
-        inline static size_t CapacityToReserve(size_t rangeLength) {
-            if constexpr (LeafSizeLog == 0) {
-                return rangeLength << 1;
+        inline static size_t CapacityToReserve(size_t rangeLength) noexcept {
+            if constexpr (LeafSizeLog < 2) {
+                return (rangeLength << 1) + 1;
             } else {
                 return rangeLength;
             }
         }
 
-        inline static size_t LeftChild(size_t nodeId, size_t rangeLength) {
+        inline static size_t LeftChild(size_t nodeId, size_t rangeLength) noexcept {
             return nodeId + 1;
         }
 
-        inline static size_t RightChild(size_t nodeId, size_t rangeLength) {
-            if constexpr (LeafSizeLog == 0) {
+        inline static size_t RightChild(size_t nodeId, size_t rangeLength) noexcept {
+            if constexpr (LeafSizeLog < 2) {
                 return nodeId + (rangeLength & ~size_t(1));
             } else {
-                return nodeId + (rangeLength >> 1) - 1;
+                return nodeId + (rangeLength >> 1);
             }
         }
 
-        inline static bool IsLeaf(size_t rangeLength) {
-            if constexpr (LeafSizeLog == 0) {
-                return rangeLength == 1;
-            } else {
-                return rangeLength <= LeafSize;
-            }
+        inline static bool IsLeaf(size_t rangeLength) noexcept {
+            return rangeLength <= LeafSize;
         }
     };
 
@@ -46,7 +65,7 @@ namespace NProust {
     struct TBinaryHeapNodeTopology {
         static constexpr size_t LeafSize = size_t(1) << LeafSizeLog;
 
-        static size_t CapacityToReserve(const size_t rangeLength) {
+        static size_t CapacityToReserve(const size_t rangeLength) noexcept {
             // Greedily compute the biggest index of a node to have
             // a talored mem estimation
             size_t currentNodeIndex = 0;
@@ -67,11 +86,11 @@ namespace NProust {
             return currentNodeIndex + 1;
         }
 
-        static size_t LeftChild(const size_t nodeId, const size_t rangeLength) {
+        static size_t LeftChild(const size_t nodeId, const size_t rangeLength) noexcept {
             return (nodeId << 1) + 1;
         }
 
-        static size_t RightChild(const size_t nodeId, const size_t rangeLength) {
+        static size_t RightChild(const size_t nodeId, const size_t rangeLength) noexcept {
             return (nodeId << 1) + 2;
         }
 

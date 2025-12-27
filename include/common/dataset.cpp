@@ -19,7 +19,7 @@ namespace NProust {
         return NProust::CreateRandomIntGenerator(minPossibleValue, maxPossibleValue);
     }
 
-    std::optional<EDatasetType> DatasetTypeFromString(const std::string_view& s) {
+    std::optional<EDatasetType> DatasetTypeFromString(const std::string_view s) {
         if (s == "SumInt32") {
             return EDatasetType::SumInt32;
         }
@@ -60,16 +60,18 @@ namespace NProust {
                     length,
                     queryCount,
                     SummationTaskElementGenerator<int32_t>(length),
-                    fname
+                    fname,
+                    NProustExamples::CreateNaiveMaxSumEngine()
                 );
                 break;
             }
             case EDatasetType::OrderStatistic16: {
-                GenerateTestPlanIntoFile<int32_t, std::vector<int32_t>, NProustExamples::TInverseOrderStatisticOperation>(
+                GenerateTestPlanIntoFile<int32_t, std::vector<int32_t>, NProustExamples::TInverseOrderStatisticOperation<16>>(
                     length,
                     queryCount,
                     RegularTaskElementGenerator<int32_t>(),
-                    fname
+                    fname,
+                    NProustExamples::CreateNaiveInverseOrderStatisticsEngine<16>()
                 );
                 break;
             }
