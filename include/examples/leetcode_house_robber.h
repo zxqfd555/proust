@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "engine/segtree/segtree.h"
+#include "engine/robust/engine.h"
 #include "engine/operations.h"
 
 namespace NProustExamples {
@@ -49,8 +49,8 @@ namespace NProustExamples {
         }
     };
 
-    inline std::unique_ptr<NProust::IEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation>> CreateLeetcodeHouseRobberEngine() {
-        return NProust::CreateRobustEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation>();
+    inline std::unique_ptr<NProust::IRangeUpdateEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation>> CreateLeetcodeHouseRobberEngine() {
+        return NProust::CreateRobustRangeUpdateEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation>();
     };
 
     // Not really needed for the task, but used it in a unit test when comparing the result against a
@@ -66,7 +66,7 @@ namespace NProustExamples {
 
     // A brute force solution to the Leetcode "House Robber" problem, with modifications.
     // An implementation of IEngine, adapted to be used as a dataset generator.
-    class TNaiveLeetcodeHouseRobberEngine: public NProust::IEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation> {
+    class TNaiveLeetcodeHouseRobberEngine: public NProust::IRangeUpdateEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation> {
     public:
         virtual NProust::TVersion Init(const size_t length) override {
             Elements.resize(length);
@@ -103,7 +103,7 @@ namespace NProustExamples {
         std::vector<int32_t> Elements;
     };
 
-    inline std::unique_ptr<NProust::IEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation>> CreateNaiveLeetcodeHouseRobberEngine() {
+    inline std::unique_ptr<NProust::IRangeUpdateEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation>> CreateNaiveLeetcodeHouseRobberEngine() {
         return std::make_unique<TNaiveLeetcodeHouseRobberEngine>();
     };
 } // namespace NProustExamples

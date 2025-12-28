@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "engine/segtree/segtree.h"
+#include "engine/robust/engine.h"
 #include "engine/operations.h"
 
 namespace NProustExamples {
@@ -47,8 +47,8 @@ namespace NProustExamples {
         }
     };
 
-    inline std::unique_ptr<NProust::IEngine<int32_t, TMaxSumState, TMaxSumStateOperation>> CreateMaxSumEngine() {
-        return NProust::CreateRobustEngine<int32_t, TMaxSumState, TMaxSumStateOperation>();
+    inline std::unique_ptr<NProust::IRangeUpdateEngine<int32_t, TMaxSumState, TMaxSumStateOperation>> CreateMaxSumEngine() {
+        return NProust::CreateRobustRangeUpdateEngine<int32_t, TMaxSumState, TMaxSumStateOperation>();
     };
 
     // Not really needed for the task, but used it in a unit test when comparing the result against a
@@ -64,7 +64,7 @@ namespace NProustExamples {
 
     // A brute force solution to the maximum subarray sum problem, with modifications.
     // An implementation of IEngine, adapted to be used as a dataset generator.
-    class TNaiveMaxSumEngine: public NProust::IEngine<int32_t, TMaxSumState, TMaxSumStateOperation> {
+    class TNaiveMaxSumEngine: public NProust::IRangeUpdateEngine<int32_t, TMaxSumState, TMaxSumStateOperation> {
     public:
         virtual NProust::TVersion Init(const size_t length) override {
             Elements.resize(length);
@@ -115,7 +115,7 @@ namespace NProustExamples {
         std::vector<int32_t> Elements;
     };
 
-    inline std::unique_ptr<NProust::IEngine<int32_t, TMaxSumState, TMaxSumStateOperation>> CreateNaiveMaxSumEngine() {
+    inline std::unique_ptr<NProust::IRangeUpdateEngine<int32_t, TMaxSumState, TMaxSumStateOperation>> CreateNaiveMaxSumEngine() {
         return std::make_unique<TNaiveMaxSumEngine>();
     };
 } // namespace NProustExamples

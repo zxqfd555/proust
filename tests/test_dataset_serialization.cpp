@@ -3,7 +3,7 @@
 #include <gtest/gtest.h>
 
 #include "common/dataset.h"
-#include "engine/segtree/segtree.h"
+#include "engine/robust/engine.h"
 #include "engine/operations.h"
 #include "serialization/dataset.h"
 
@@ -19,7 +19,8 @@ TEST(DatasetSerialization, Simple) {
     };
 
     NProust::TStreamingDatasetWriter<int64_t, int64_t> writer(queryCount, length, stream);
-    NProust::GenerateTestPlan<int64_t, int64_t, NProust::TSumOperation>(length, queryCount, valueGenerator, writer);
+    NProust::TRangeUpdatePlanGenerator baseGenerator(length);
+    NProust::GenerateTestPlan<int64_t, int64_t, NProust::TSumOperation>(length, queryCount, baseGenerator, valueGenerator, writer);
 
     stream.seekg(0);
     NProust::TStreamingDatasetReader<int64_t, int64_t> reader(stream);

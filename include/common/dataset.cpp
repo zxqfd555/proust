@@ -36,11 +36,14 @@ namespace NProust {
     }
 
     void GenerateDataset(const EDatasetType type, const size_t length, const size_t queryCount, const std::string fname) {
+        auto baseGenerator = TRangeUpdatePlanGenerator(length);
+
         switch (type) {
             case EDatasetType::SumInt32: {
                 GenerateTestPlanIntoFile<int32_t, int32_t, NProust::TSumOperation>(
                     length,
                     queryCount,
+                    baseGenerator,
                     SummationTaskElementGenerator<int32_t>(length),
                     fname
                 );
@@ -50,6 +53,7 @@ namespace NProust {
                 GenerateTestPlanIntoFile<int32_t, int32_t, NProust::TMaxOperation>(
                     length,
                     queryCount,
+                    baseGenerator,
                     RegularTaskElementGenerator<int32_t>(),
                     fname
                 );
@@ -59,6 +63,7 @@ namespace NProust {
                 GenerateTestPlanIntoFile<int32_t, NProustExamples::TMaxSumState, NProustExamples::TMaxSumStateOperation>(
                     length,
                     queryCount,
+                    baseGenerator,
                     SummationTaskElementGenerator<int32_t>(length),
                     fname,
                     NProustExamples::CreateNaiveMaxSumEngine()
@@ -69,6 +74,7 @@ namespace NProust {
                 GenerateTestPlanIntoFile<int32_t, std::vector<int32_t>, NProustExamples::TInverseOrderStatisticOperation<16>>(
                     length,
                     queryCount,
+                    baseGenerator,
                     RegularTaskElementGenerator<int32_t>(),
                     fname,
                     NProustExamples::CreateNaiveInverseOrderStatisticsEngine<16>()

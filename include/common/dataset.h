@@ -8,7 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include "query.h"
-#include "engine/naive/naive.h"
+#include "engine/naive/engine.h"
 #include "serialization/dataset.h"
 
 namespace NProust {
@@ -17,6 +17,11 @@ namespace NProust {
         MaxInt32,
         MaxSumInt32,
         OrderStatistic16,
+    };
+
+    enum class EBaseGeneratorType {
+        Point,
+        Range,
     };
 
     std::optional<EDatasetType> DatasetTypeFromString(const std::string_view s);
@@ -38,46 +43,33 @@ namespace NProust {
     void GenerateTestPlan(
         const size_t length,
         const size_t queryCount,
+        ITestPlanBaseGenerator& baseGenerator,
         std::function<TValue(std::mt19937&)> valueGenerator,
         TStreamingDatasetWriter<TValue, TOperationResult>& target,
-        std::unique_ptr<NProust::IEngine<TValue, TOperationResult, TOperation>> groundTruthEngine = nullptr
+        std::unique_ptr<IRangeUpdateEngine<TValue, TOperationResult, TOperation>> groundTruthEngine = nullptr
     ) {
         std::mt19937 rng(std::random_device{}());
-        std::uniform_int_distribution<int> opDist(0, 1);
-        std::uniform_int_distribution<int> leftDist(0, length - 1);
-        std::uniform_int_distribution<int> rightDist(0, length);
 
         if (!groundTruthEngine) {
-            groundTruthEngine = NProust::CreateNaiveEngine<TValue, TOperationResult, TOperation>();
+            groundTruthEngine = NProust::CreateNaiveRangeUpdateEngine<TValue, TOperationResult, TOperation>();
         }
 
         groundTruthEngine->Init(length);
         const size_t intervalForLogging = queryCount / (GENERATION_LOG_FREQUENCY + 1) + 1;
         const auto generationStartedAt = std::chrono::high_resolution_clock::now();
         for (size_t querySeqIdx = 0; querySeqIdx < queryCount; ++querySeqIdx) {
-            size_t left = leftDist(rng);
-            size_t right = rightDist(rng);
-            if (left > right) {
-                std::swap(left, right);
-            }
-
-            EEngineOperation operation = static_cast<EEngineOperation>(opDist(rng));
-            switch (operation) {
+            const auto base = baseGenerator.Next();
+            switch (base.Operation) {
                 case EEngineOperation::SetRange: {
                     const auto value = valueGenerator(rng);
-                    groundTruthEngine->SetRange(left, right, value);
-
-                    const auto item = TTestPlanItem<TValue, TOperationResult>(operation, left, right, value, std::nullopt);
+                    groundTruthEngine->SetRange(base.Left, base.Right, value);
+                    const auto item = TTestPlanItem<TValue, TOperationResult>(base, value, std::nullopt);
                     target.SaveQuery(item);
                     break;
                 }
                 case EEngineOperation::Query: {
-                    if (left == right) {
-                        right += 1;
-                    }
-                    const auto expectedResult = groundTruthEngine->ComputeRange(left, right);
-
-                    const auto item = TTestPlanItem<TValue, TOperationResult>(operation, left, right, std::nullopt, expectedResult);
+                    const auto expectedResult = groundTruthEngine->ComputeRange(base.Left, base.Right);
+                    const auto item = TTestPlanItem<TValue, TOperationResult>(base, std::nullopt, expectedResult);
                     target.SaveQuery(item);
                     break;
                 }
@@ -108,23 +100,25 @@ namespace NProust {
     void GenerateTestPlanIntoFile(
         const size_t length,
         const size_t queryCount,
+        ITestPlanBaseGenerator& baseGenerator,
         std::function<TValue(std::mt19937&)> valueGenerator,
         const std::string& targetPath,
-        std::unique_ptr<NProust::IEngine<TValue, TOperationResult, TOperation>> groundTruthEngine = nullptr
+        std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation>> groundTruthEngine = nullptr
     ) {
         auto streamer = TStreamingDatasetWriter<TValue, TOperationResult>(queryCount, length, targetPath);
-        GenerateTestPlan<TValue, TOperationResult, TOperation>(length, queryCount, valueGenerator, streamer, std::move(groundTruthEngine));
+        GenerateTestPlan<TValue, TOperationResult, TOperation>(length, queryCount, baseGenerator, valueGenerator, streamer, std::move(groundTruthEngine));
     }
 
     template<typename TValue, typename TOperationResult, typename TOperation>
     void GenerateTestPlanIntoOstream(
         const size_t length,
         const size_t queryCount,
+        ITestPlanBaseGenerator& baseGenerator,
         std::function<TValue(std::mt19937&)> valueGenerator,
         std::ostream& target,
-        std::unique_ptr<NProust::IEngine<TValue, TOperationResult, TOperation>> groundTruthEngine = nullptr
+        std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation>> groundTruthEngine = nullptr
     ) {
         auto streamer = TStreamingDatasetWriter<TValue, TOperationResult>(queryCount, length, target);
-        GenerateTestPlan<TValue, TOperationResult, TOperation>(length, queryCount, valueGenerator, streamer, std::move(groundTruthEngine));
+        GenerateTestPlan<TValue, TOperationResult, TOperation>(length, queryCount, baseGenerator, valueGenerator, streamer, std::move(groundTruthEngine));
     }
 } // namespace NProust

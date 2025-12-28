@@ -4,16 +4,17 @@
 #include <string_view>
 #include <span>
 
-#include "engine/segtree/layout.h"
-#include "engine/segtree/topology.h"
+#include "engine/robust/layout.h"
+#include "engine/robust/topology.h"
 
-const std::string DATASET_FILE_PARAM = "--dataset-file";
-const std::string DATASET_TYPE_PARAM = "--dataset-type";
-const std::string LENGTH_PARAM = "--length";
-const std::string QUERY_COUNT_PARAM = "--query-count";
-const std::string DATA_LAYOUT_PARAM = "--data-layout";
-const std::string NODE_TOPOLOGY_PARAM = "--node-topology";
-const std::string LEAF_SIZE_LOG_PARAM = "--leaf-size-log";
+constexpr std::string_view DATASET_FILE_PARAM = "--dataset-file";
+constexpr std::string_view DATASET_TYPE_PARAM = "--dataset-type";
+constexpr std::string_view LENGTH_PARAM = "--length";
+constexpr std::string_view QUERY_COUNT_PARAM = "--query-count";
+constexpr std::string_view DATA_LAYOUT_PARAM = "--data-layout";
+constexpr std::string_view NODE_TOPOLOGY_PARAM = "--node-topology";
+constexpr std::string_view LEAF_SIZE_LOG_PARAM = "--leaf-size-log";
+constexpr std::string_view WITH_SENTINEL_PARAM = "--with-sentinel";
 
 template<class TValue>
 void ParseStringArgument(auto& iterator, const auto& endIterator, TValue& dst) {
@@ -66,7 +67,7 @@ void ParseNodeTopologyArgument(auto& iterator, const auto& endIterator, std::opt
 }
 
 template<class TValue>
-void CheckFieldPresence(const std::string& fieldName, const std::optional<TValue>& fieldValue) {
+void CheckFieldPresence(const std::string_view fieldName, const std::optional<TValue>& fieldValue) {
     if (fieldValue == std::nullopt) {
         spdlog::critical("'{}' is not specified", fieldName);
         std::terminate();

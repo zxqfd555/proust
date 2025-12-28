@@ -8,7 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include "common/dataset.h"
-#include "engine/segtree/segtree.h"
+#include "engine/robust/engine.h"
 #include "engine/operations.h"
 
 template<typename TValue, typename TOperationResult, typename TOperation, NProust::NodeTopology TNodeTopology = NProust::TPreorderNodeTopology<0>>
@@ -16,18 +16,37 @@ void StressTest(
     const size_t length,
     const size_t queryCount,
     std::function<TValue(std::mt19937&)> valueGenerator,
-    std::unique_ptr<NProust::IEngine<TValue, TOperationResult, TOperation>> groundTruthEngine = nullptr
+    const NProust::EBaseGeneratorType baseGeneratorType = NProust::EBaseGeneratorType::Range,
+    std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation>> groundTruthEngine = nullptr
 ) {
     std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
     NProust::TStreamingDatasetWriter<TValue, TOperationResult> writer(queryCount, length, stream);
-    NProust::GenerateTestPlan<TValue, TOperationResult, TOperation>(length, queryCount, valueGenerator, writer, std::move(groundTruthEngine));
+
+    std::unique_ptr<NProust::ITestPlanBaseGenerator> baseGenerator;
+    std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation>> rangeUpdateEngine;
+    std::unique_ptr<NProust::IPointUpdateEngine<TValue, TOperationResult, TOperation>> pointUpdateEngine;
+
+    switch (baseGeneratorType) {
+        case (NProust::EBaseGeneratorType::Point): {
+            baseGenerator = std::make_unique<NProust::TPointUpdatePlanGenerator>(length);
+            pointUpdateEngine = NProust::CreateRobustPointUpdateEngine<TValue, TOperationResult, TOperation>();
+            pointUpdateEngine->Init(length);
+            break;
+        }
+        case (NProust::EBaseGeneratorType::Range): {
+            baseGenerator = std::make_unique<NProust::TRangeUpdatePlanGenerator>(length);
+            rangeUpdateEngine = NProust::CreateRobustRangeUpdateEngine<TValue, TOperationResult, TOperation, TNodeTopology>();
+            rangeUpdateEngine->Init(length);
+            break;
+        }
+    };
+    assert(!!baseGenerator);
+    NProust::GenerateTestPlan<TValue, TOperationResult, TOperation>(length, queryCount, *baseGenerator, valueGenerator, writer, std::move(groundTruthEngine));
 
     stream.seekg(0);
     NProust::TStreamingDatasetReader<TValue, TOperationResult> reader(stream);
 
     const auto testStartedAt = std::chrono::high_resolution_clock::now();
-    auto robustEngine = NProust::CreateRobustEngine<TValue, TOperationResult, TOperation, TNodeTopology>();
-    robustEngine->Init(length);
 
     size_t queriesProcessed = 0;
     while (auto maybeItem = reader.NextQuery()) {
@@ -39,11 +58,31 @@ void StressTest(
         switch (planItem.Operation) {
             case NProust::EEngineOperation::SetRange: {
                 EXPECT_TRUE(planItem.Value.has_value());
-                robustEngine->SetRange(planItem.Left, planItem.Right, *planItem.Value);
+                switch (baseGeneratorType) {
+                    case (NProust::EBaseGeneratorType::Point): {
+                        EXPECT_EQ(planItem.Left + 1, planItem.Right);
+                        pointUpdateEngine->SetPoint(planItem.Left, *planItem.Value);
+                        break;
+                    }
+                    case (NProust::EBaseGeneratorType::Range): {
+                        rangeUpdateEngine->SetRange(planItem.Left, planItem.Right, *planItem.Value);
+                        break;
+                    }
+                };
                 break;
             }
             case NProust::EEngineOperation::Query: {
-                const auto result = robustEngine->ComputeRange(planItem.Left, planItem.Right);
+                TOperationResult result;
+                switch (baseGeneratorType) {
+                    case (NProust::EBaseGeneratorType::Point): {
+                        result = pointUpdateEngine->ComputeRange(planItem.Left, planItem.Right);
+                        break;
+                    }
+                    case (NProust::EBaseGeneratorType::Range): {
+                        result = rangeUpdateEngine->ComputeRange(planItem.Left, planItem.Right);
+                        break;
+                    }
+                };
                 EXPECT_EQ(result, *planItem.ExpectedResult);
                 break;
             }

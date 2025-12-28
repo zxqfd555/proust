@@ -7,11 +7,11 @@
 
 namespace NProust {
     template<typename TValue, typename TOperationResult, typename TOperation>
-    class TNaiveEngine: public IEngine<TValue, TOperationResult, TOperation> {
-        using TBase = IEngine<TValue, TOperationResult, TOperation>;
+    class TNaiveRangeUpdateEngine: public IRangeUpdateEngine<TValue, TOperationResult, TOperation> {
+        using TBase = IRangeUpdateEngine<TValue, TOperationResult, TOperation>;
 
     public:
-        TNaiveEngine() = default;
+        TNaiveRangeUpdateEngine() = default;
 
         virtual TVersion Init(const size_t length) override {
             Elements = std::vector<TOperationResult>(length, TOperationResult());
@@ -45,8 +45,8 @@ namespace NProust {
     };
 
     template<typename TValue, typename TOperationResult, typename TOperation>
-    std::unique_ptr<IEngine<TValue, TOperationResult, TOperation>> CreateNaiveEngine() {
-        return std::make_unique<TNaiveEngine<TValue, TOperationResult, TOperation>>();
+    std::unique_ptr<IRangeUpdateEngine<TValue, TOperationResult, TOperation>> CreateNaiveRangeUpdateEngine() {
+        return std::make_unique<TNaiveRangeUpdateEngine<TValue, TOperationResult, TOperation>>();
     }
 
 } // namespace NProust

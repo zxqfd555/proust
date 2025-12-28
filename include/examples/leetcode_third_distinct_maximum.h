@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "engine/segtree/segtree.h"
+#include "engine/robust/engine.h"
 #include "engine/operations.h"
 
 namespace NProustExamples {
@@ -49,14 +49,14 @@ namespace NProustExamples {
     };
 
     template<size_t StatisticsRequired = 3>
-    inline std::unique_ptr<NProust::IEngine<int32_t, TInverseOrderStatisticState, TInverseOrderStatisticOperation<StatisticsRequired>>> CreateInverseOrderStatisticsEngine() {
-        return NProust::CreateRobustEngine<int32_t, TInverseOrderStatisticState, TInverseOrderStatisticOperation<StatisticsRequired>>();
+    inline std::unique_ptr<NProust::IRangeUpdateEngine<int32_t, TInverseOrderStatisticState, TInverseOrderStatisticOperation<StatisticsRequired>>> CreateInverseOrderStatisticsEngine() {
+        return NProust::CreateRobustRangeUpdateEngine<int32_t, TInverseOrderStatisticState, TInverseOrderStatisticOperation<StatisticsRequired>>();
     };
 
     // A brute force solution to the inverse order statistic problem, with modifications.
     // An implementation of IEngine, adapted to be used as a dataset generator.
     template<size_t StatisticsRequired = 3>
-    class TNaiveInverseOrderStatisticsEngine: public NProust::IEngine<int32_t, TInverseOrderStatisticState, TInverseOrderStatisticOperation<StatisticsRequired>> {
+    class TNaiveInverseOrderStatisticsEngine: public NProust::IRangeUpdateEngine<int32_t, TInverseOrderStatisticState, TInverseOrderStatisticOperation<StatisticsRequired>> {
     public:
         virtual NProust::TVersion Init(const size_t length) override {
             Elements.resize(length);
@@ -100,7 +100,7 @@ namespace NProustExamples {
     };
 
     template<size_t StatisticsRequired = 3>
-    inline std::unique_ptr<NProust::IEngine<int32_t, TInverseOrderStatisticState, TInverseOrderStatisticOperation<StatisticsRequired>>> CreateNaiveInverseOrderStatisticsEngine() {
+    inline std::unique_ptr<NProust::IRangeUpdateEngine<int32_t, TInverseOrderStatisticState, TInverseOrderStatisticOperation<StatisticsRequired>>> CreateNaiveInverseOrderStatisticsEngine() {
         return std::make_unique<TNaiveInverseOrderStatisticsEngine<StatisticsRequired>>();
     };
 } // namespace NProustExamples

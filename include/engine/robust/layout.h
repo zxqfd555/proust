@@ -24,14 +24,6 @@ namespace NProust {
         return std::nullopt;
     }
 
-    template<class T, class TValue>
-    concept LazyTag = requires(T tag, TValue v) {
-        { tag.Defined() } -> std::same_as<bool>;
-        { tag.GetValue() } -> std::same_as<const TValue&>;
-        tag.SetValue(v);
-        tag.Drop();
-    };
-
     template<class TValue, class TSentinel = void>
     class TLazyTag;
 
@@ -128,6 +120,19 @@ namespace NProust {
         template<class TValue, auto Sentinel>
         using TLazyTagSelector = typename TLazyTagSelectorImpl<TValue, Sentinel>::TLazyTagImpl;
     } // namespace NDetail
+
+    template <typename T, typename TValue, typename TOperationResult>
+    concept DataLayout = requires(T layout, size_t nodeId, TValue value, TOperationResult opRes) {
+        { layout.ReserveCapacities(nodeId) };
+
+        { layout.HasLazilyPropagated(nodeId) } -> std::convertible_to<bool>;
+        { layout.GetLazilyPropagated(nodeId) } -> std::same_as<const TValue&>;
+        { layout.SetLazilyPropagated(nodeId, value) };
+        { layout.DropLazilyPropagated(nodeId) };
+
+        { layout.GetSubtreeValue(nodeId) } -> std::same_as<const TOperationResult&>;
+        { layout.SetSubtreeValue(nodeId, opRes) };
+    };
 
     template<class TValue, class TOperationResult, auto Sentinel>
     class TAoSLayout {
