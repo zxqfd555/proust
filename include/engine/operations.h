@@ -3,12 +3,12 @@
 namespace NProust {
     struct TSumOperation {
         template<typename TValue, typename TOperationResult>
-        static TOperationResult Repeat(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v * times))) {
+        inline static TOperationResult Repeat(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v * times))) {
             return TOperationResult(v * times);
         }
 
         template<typename TOperationResult>
-        static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) noexcept(noexcept(lhs + rhs)) {
+        inline static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) noexcept(noexcept(lhs + rhs)) {
             return lhs + rhs;
         }
     };

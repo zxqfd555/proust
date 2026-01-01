@@ -15,6 +15,7 @@ constexpr std::string_view DATA_LAYOUT_PARAM = "--data-layout";
 constexpr std::string_view NODE_TOPOLOGY_PARAM = "--node-topology";
 constexpr std::string_view LEAF_SIZE_LOG_PARAM = "--leaf-size-log";
 constexpr std::string_view WITH_SENTINEL_PARAM = "--with-sentinel";
+constexpr std::string_view GENERATOR_TYPE_PARAM = "--generator-type";
 
 template<class TValue>
 void ParseStringArgument(auto& iterator, const auto& endIterator, TValue& dst) {
@@ -62,6 +63,16 @@ void ParseNodeTopologyArgument(auto& iterator, const auto& endIterator, std::opt
     nodeTopology = NProust::NodeTopologyFromString(rawNodeTopology);
     if (!nodeTopology) {
         spdlog::critical("Unknown node topology: {}", *iterator);
+        std::terminate();
+    }
+}
+
+void ParseBaseGeneratorTypeArgument(auto& iterator, const auto& endIterator, std::optional<NProust::EBaseGeneratorType>& baseGeneratorType) {
+    std::string_view rawBaseGeneratorType;
+    ParseStringArgument(iterator, endIterator, rawBaseGeneratorType);
+    baseGeneratorType = NProust::BaseGeneratorTypeFromString(rawBaseGeneratorType);
+    if (!baseGeneratorType) {
+        spdlog::critical("Unknown base generator type: {}", *iterator);
         std::terminate();
     }
 }

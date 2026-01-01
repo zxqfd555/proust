@@ -32,8 +32,8 @@ namespace NProust {
         const size_t Length;
         std::mt19937 Rng;
         std::bernoulli_distribution IsModification;
-        std::uniform_int_distribution<int32_t> RangeStartDist;
-        std::uniform_int_distribution<int32_t> RangeEndDist;
+        std::uniform_int_distribution<size_t> RangeStartDist;
+        std::uniform_int_distribution<size_t> RangeEndDist;
 
         EEngineOperation NextOperation() {
             bool isModification = IsModification(Rng);
@@ -101,7 +101,7 @@ namespace NProust {
                     // For the point modification, the right part doesn't make sense.
                     // `point + 1` is, however, a convenient value, allowing us to run
                     // the range update engine versions without changes.
-                    return TTestPlanBase { EEngineOperation::SetRange, (size_t)point, (size_t)point + 1 };
+                    return TTestPlanBase { EEngineOperation::SetRange, point, point + 1 };
                 }
                 case EEngineOperation::Query: {
                     return NextQuery();

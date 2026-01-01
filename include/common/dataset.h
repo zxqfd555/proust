@@ -25,7 +25,8 @@ namespace NProust {
     };
 
     std::optional<EDatasetType> DatasetTypeFromString(const std::string_view s);
-    void GenerateDataset(const EDatasetType type, size_t length, const size_t queryCount, const std::string fname);
+    std::optional<EBaseGeneratorType> BaseGeneratorTypeFromString(const std::string_view s);
+    void GenerateDataset(const EDatasetType type, size_t length, const size_t queryCount, const std::string fname, ITestPlanBaseGenerator& baseGenerator);
 
     template<class TValue>
     std::function<TValue(std::mt19937&)> CreateRandomIntGenerator(const TValue lower, const TValue upper) {

@@ -15,50 +15,62 @@ using NProust::CreateRandomIntGenerator;
 
 TEST(InMemoryStress, IntSmallRangeSum) {
     StressTest<int64_t, int64_t, NProust::TSumOperation>(16, 10000000, CreateRandomIntGenerator(-100, 100));
+    StressTest<int64_t, int64_t, NProust::TSumOperation>(16, 10000000, CreateRandomIntGenerator(-100, 100), NProust::EBaseGeneratorType::Point);
 }
 
 TEST(InMemoryStress, IntSmallRangeAnd) {
     StressTest<int64_t, int64_t, NProust::TBitwiseAndOperation>(16, 10000000, CreateRandomIntGenerator(0, 65535));
+    StressTest<int64_t, int64_t, NProust::TBitwiseAndOperation>(16, 10000000, CreateRandomIntGenerator(0, 65535), NProust::EBaseGeneratorType::Point);
 }
 
 TEST(InMemoryStress, IntSmallRangeOr) {
     StressTest<int64_t, int64_t, NProust::TBitwiseOrOperation>(16, 10000000, CreateRandomIntGenerator(0, 65535));
+    StressTest<int64_t, int64_t, NProust::TBitwiseOrOperation>(16, 10000000, CreateRandomIntGenerator(0, 65535), NProust::EBaseGeneratorType::Point);
 }
 
 TEST(InMemoryStress, IntSmallRangeXor) {
     StressTest<int64_t, int64_t, NProust::TBitwiseXorOperation>(16, 10000000, CreateRandomIntGenerator(0, 65535));
+    StressTest<int64_t, int64_t, NProust::TBitwiseXorOperation>(16, 10000000, CreateRandomIntGenerator(0, 65535), NProust::EBaseGeneratorType::Point);
 }
 
 TEST(InMemoryStress, IntSmallRangeMin) {
     StressTest<int64_t, int64_t, NProust::TMinOperation>(16, 10000000, CreateRandomIntGenerator(-100, 100));
+    StressTest<int64_t, int64_t, NProust::TMinOperation>(16, 10000000, CreateRandomIntGenerator(-100, 100), NProust::EBaseGeneratorType::Point);
 }
 
 TEST(InMemoryStress, IntSmallRangeMax) {
     StressTest<int64_t, int64_t, NProust::TMaxOperation>(16, 10000000, CreateRandomIntGenerator(-100, 100));
+    StressTest<int64_t, int64_t, NProust::TMaxOperation>(16, 10000000, CreateRandomIntGenerator(-100, 100), NProust::EBaseGeneratorType::Point);
 }
 
 TEST(InMemoryStress, IntRangeSum) {
     StressTest<int64_t, int64_t, NProust::TSumOperation>(1000, 1000000, CreateRandomIntGenerator(-100, 100));
+    StressTest<int64_t, int64_t, NProust::TSumOperation>(1000, 1000000, CreateRandomIntGenerator(-100, 100), NProust::EBaseGeneratorType::Point);
 }
 
 TEST(InMemoryStress, IntRangeAnd) {
     StressTest<int64_t, int64_t, NProust::TBitwiseAndOperation>(1000, 1000000, CreateRandomIntGenerator(0, 65535));
+    StressTest<int64_t, int64_t, NProust::TBitwiseAndOperation>(1000, 1000000, CreateRandomIntGenerator(0, 65535), NProust::EBaseGeneratorType::Point);
 }
 
 TEST(InMemoryStress, IntRangeOr) {
     StressTest<int64_t, int64_t, NProust::TBitwiseOrOperation>(1000, 1000000, CreateRandomIntGenerator(0, 65535));
+    StressTest<int64_t, int64_t, NProust::TBitwiseOrOperation>(1000, 1000000, CreateRandomIntGenerator(0, 65535), NProust::EBaseGeneratorType::Point);
 }
 
 TEST(InMemoryStress, IntRangeXor) {
     StressTest<int64_t, int64_t, NProust::TBitwiseXorOperation>(1000, 1000000, CreateRandomIntGenerator(0, 65535));
+    StressTest<int64_t, int64_t, NProust::TBitwiseXorOperation>(1000, 1000000, CreateRandomIntGenerator(0, 65535), NProust::EBaseGeneratorType::Point);
 }
 
 TEST(InMemoryStress, IntRangeMin) {
     StressTest<int64_t, int64_t, NProust::TMinOperation>(1000, 1000000, CreateRandomIntGenerator(-100, 100));
+    StressTest<int64_t, int64_t, NProust::TMinOperation>(1000, 1000000, CreateRandomIntGenerator(-100, 100), NProust::EBaseGeneratorType::Point);
 }
 
 TEST(InMemoryStress, IntRangeMax) {
     StressTest<int64_t, int64_t, NProust::TMaxOperation>(1000, 1000000, CreateRandomIntGenerator(-100, 100));
+    StressTest<int64_t, int64_t, NProust::TMaxOperation>(1000, 1000000, CreateRandomIntGenerator(-100, 100), NProust::EBaseGeneratorType::Point);
 }
 
 TEST(InMemoryStress, PreorderTopology) {

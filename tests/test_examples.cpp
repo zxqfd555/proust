@@ -10,70 +10,84 @@
 using NProust::CreateRandomIntGenerator;
 
 TEST(Examples, MaxSubarraySum) {
-    auto engine = NProustExamples::CreateMaxSumEngine();
-    auto bruteForceEngine = NProustExamples::CreateNaiveMaxSumEngine();
-
     // Range modification version
-    StressTest<int32_t, NProustExamples::TMaxSumState, NProustExamples::TMaxSumStateOperation>(
-        1000,
-        1000000,
-        CreateRandomIntGenerator(-10000, 10000),
-        NProust::EBaseGeneratorType::Range,
-        std::move(bruteForceEngine)
-    );
+    {
+        auto bruteForceEngine = NProustExamples::CreateNaiveMaxSumEngine();
+        StressTest<int32_t, NProustExamples::TMaxSumState, NProustExamples::TMaxSumStateOperation>(
+            1000,
+            1000000,
+            CreateRandomIntGenerator(-10000, 10000),
+            NProust::EBaseGeneratorType::Range,
+            std::move(bruteForceEngine)
+        );
+    }
 
     // Point modification version
-    StressTest<int32_t, NProustExamples::TMaxSumState, NProustExamples::TMaxSumStateOperation>(
-        1000,
-        1000000,
-        CreateRandomIntGenerator(-10000, 10000),
-        NProust::EBaseGeneratorType::Point,
-        std::move(bruteForceEngine)
-    );
+    {
+        auto bruteForceEngine = NProustExamples::CreateNaiveMaxSumEngine();
+        StressTest<int32_t, NProustExamples::TMaxSumState, NProustExamples::TMaxSumStateOperation>(
+            1000,
+            1000000,
+            CreateRandomIntGenerator(-10000, 10000),
+            NProust::EBaseGeneratorType::Point,
+            std::move(bruteForceEngine)
+        );
+    }
 }
 
 TEST(Examples, ThirdDistinctMaximum) {
-    auto engine = NProustExamples::CreateInverseOrderStatisticsEngine();
-    auto bruteForceEngine = NProustExamples::CreateNaiveInverseOrderStatisticsEngine();
-
     // Range modification version
-    StressTest<int32_t, NProustExamples::TInverseOrderStatisticState, NProustExamples::TInverseOrderStatisticOperation<3>>(
-        1000,
-        1000000,
-        CreateRandomIntGenerator(-1'000'000'000, 1'000'000'000),
-        NProust::EBaseGeneratorType::Range,
-        std::move(bruteForceEngine)
-    );
+    {
+        auto bruteForceEngine = NProustExamples::CreateNaiveInverseOrderStatisticsEngine();
+        StressTest<int32_t, NProustExamples::TInverseOrderStatisticState, NProustExamples::TInverseOrderStatisticOperation<3>>(
+            1000,
+            1000000,
+            CreateRandomIntGenerator(-1'000'000'000, 1'000'000'000),
+            NProust::EBaseGeneratorType::Range,
+            std::move(bruteForceEngine)
+        );
+    }
 
     // Point modification version
-    StressTest<int32_t, NProustExamples::TInverseOrderStatisticState, NProustExamples::TInverseOrderStatisticOperation<3>>(
-        1000,
-        1000000,
-        CreateRandomIntGenerator(-1'000'000'000, 1'000'000'000),
-        NProust::EBaseGeneratorType::Point,
-        std::move(bruteForceEngine)
-    );
+    {
+        // Check the common error first
+        auto robustEngine = NProust::CreateRobustPointUpdateEngine<int32_t, NProustExamples::TInverseOrderStatisticState, NProustExamples::TInverseOrderStatisticOperation<3>>();
+        robustEngine->Init(10);
+        EXPECT_EQ(robustEngine->ComputeRange(0, 1), std::vector<int32_t>{0});
+
+        auto bruteForceEngine = NProustExamples::CreateNaiveInverseOrderStatisticsEngine();
+        StressTest<int32_t, NProustExamples::TInverseOrderStatisticState, NProustExamples::TInverseOrderStatisticOperation<3>>(
+            1000,
+            1000000,
+            CreateRandomIntGenerator(-1'000'000'000, 1'000'000'000),
+            NProust::EBaseGeneratorType::Point,
+            std::move(bruteForceEngine)
+        );
+    }
 }
 
 TEST(Examples, LeetcodeHouseRobber) {
-    auto engine = NProustExamples::CreateLeetcodeHouseRobberEngine();
-    auto bruteForceEngine = NProustExamples::CreateNaiveLeetcodeHouseRobberEngine();
-
     // Range modification version
-    StressTest<int32_t, NProustExamples::THouseRobberDPState, NProustExamples::THouseRobberDPStateOperation>(
-        1000,
-        1000000,
-        CreateRandomIntGenerator(-10000, 10000),
-        NProust::EBaseGeneratorType::Range,
-        std::move(bruteForceEngine)
-    );
+    {
+        auto bruteForceEngine = NProustExamples::CreateNaiveLeetcodeHouseRobberEngine();
+        StressTest<int32_t, NProustExamples::THouseRobberDPState, NProustExamples::THouseRobberDPStateOperation>(
+            1000,
+            1000000,
+            CreateRandomIntGenerator(-10000, 10000),
+            NProust::EBaseGeneratorType::Range,
+            std::move(bruteForceEngine)
+        );
+    }
 
-    // Point modificatio version
-    StressTest<int32_t, NProustExamples::THouseRobberDPState, NProustExamples::THouseRobberDPStateOperation>(
-        1000,
-        1000000,
-        CreateRandomIntGenerator(-10000, 10000),
-        NProust::EBaseGeneratorType::Point,
-        std::move(bruteForceEngine)
-    );
+    // Point modification version
+    {
+        auto bruteForceEngine = NProustExamples::CreateNaiveLeetcodeHouseRobberEngine();
+        StressTest<int32_t, NProustExamples::THouseRobberDPState, NProustExamples::THouseRobberDPStateOperation>(
+            1000,
+            1000000,
+            CreateRandomIntGenerator(-10000, 10000),
+            NProust::EBaseGeneratorType::Point,
+            std::move(bruteForceEngine)
+        );
+    }
 }

@@ -188,15 +188,16 @@ void RunDatasetWithSettings(
     NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer,
     const NProust::EDataLayout layout,
     const NProust::ENodeTopology topology,
-    const size_t leafSizeLog
+    const size_t leafSizeLog,
+    const NProust::EBaseGeneratorType baseGeneratorType
 ) {
     switch (layout) {
         case NProust::EDataLayout::AoS: {
-            DispatchTopologyAndRun<TValue, TOperationResult, TOperation, NProust::TAoSLayout<TValue, TOperationResult, Sentinel>>(streamer, topology, leafSizeLog);
+            DispatchTopologyAndRun<TValue, TOperationResult, TOperation, NProust::TAoSLayout<TValue, TOperationResult, Sentinel>>(streamer, topology, leafSizeLog, baseGeneratorType);
             break;
         }
         case NProust::EDataLayout::SoA: {
-            DispatchTopologyAndRun<TValue, TOperationResult, TOperation, NProust::TSoALayout<TValue, TOperationResult, Sentinel>>(streamer, topology, leafSizeLog);
+            DispatchTopologyAndRun<TValue, TOperationResult, TOperation, NProust::TSoALayout<TValue, TOperationResult, Sentinel>>(streamer, topology, leafSizeLog, baseGeneratorType);
             break;
         }
     }
@@ -206,20 +207,21 @@ template<class TValue, class TOperationResult, class TOperation, NProust::DataLa
 void DispatchTopologyAndRun(
     NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer,
     NProust::ENodeTopology topology,
-    size_t leafSizeLog
+    size_t leafSizeLog,
+    const NProust::EBaseGeneratorType baseGeneratorType
 ) {
     switch (leafSizeLog) {
-        case 0: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 0>(streamer, topology); break;
-        case 1: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 1>(streamer, topology); break;
-        case 2: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 2>(streamer, topology); break;
-        case 3: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 3>(streamer, topology); break;
-        case 4: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 4>(streamer, topology); break;
-        case 5: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 5>(streamer, topology); break;
-        case 6: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 6>(streamer, topology); break;
-        case 7: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 7>(streamer, topology); break;
-        case 8: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 8>(streamer, topology); break;
-        case 9: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 9>(streamer, topology); break;
-        case 10: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 10>(streamer, topology); break;
+        case 0: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 0>(streamer, topology, baseGeneratorType); break;
+        case 1: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 1>(streamer, topology, baseGeneratorType); break;
+        case 2: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 2>(streamer, topology, baseGeneratorType); break;
+        case 3: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 3>(streamer, topology, baseGeneratorType); break;
+        case 4: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 4>(streamer, topology, baseGeneratorType); break;
+        case 5: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 5>(streamer, topology, baseGeneratorType); break;
+        case 6: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 6>(streamer, topology, baseGeneratorType); break;
+        case 7: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 7>(streamer, topology, baseGeneratorType); break;
+        case 8: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 8>(streamer, topology, baseGeneratorType); break;
+        case 9: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 9>(streamer, topology, baseGeneratorType); break;
+        case 10: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 10>(streamer, topology, baseGeneratorType); break;
         default: {
             spdlog::critical("Unsupported value of {}: {}", LEAF_SIZE_LOG_PARAM, leafSizeLog);
             std::terminate();
@@ -230,35 +232,51 @@ void DispatchTopologyAndRun(
 template<class TValue, class TOperationResult, class TOperation, NProust::DataLayout<TValue, TOperationResult> TDataLayout, size_t LeafSizeLog>
 void RunWithDispatchedTopology(
     NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer,
-    const NProust::ENodeTopology topology
+    const NProust::ENodeTopology topology,
+    const NProust::EBaseGeneratorType baseGeneratorType
 ) {
     switch (topology) {
         case NProust::ENodeTopology::BinaryHeap: {
-            RunDataset<TValue, TOperationResult, TOperation, TDataLayout, NProust::TBinaryHeapNodeTopology<LeafSizeLog>>(streamer);
+            RunDataset<TValue, TOperationResult, TOperation, TDataLayout, NProust::TBinaryHeapNodeTopology<LeafSizeLog>, LeafSizeLog>(streamer, baseGeneratorType);
             break;
         }
         case NProust::ENodeTopology::Preorder: {
-            RunDataset<TValue, TOperationResult, TOperation, TDataLayout, NProust::TPreorderNodeTopology<LeafSizeLog>>(streamer);
+            RunDataset<TValue, TOperationResult, TOperation, TDataLayout, NProust::TPreorderNodeTopology<LeafSizeLog>, LeafSizeLog>(streamer, baseGeneratorType);
             break;
         }
     }
 }
 
-template<class TValue, class TOperationResult, class TOperation, NProust::DataLayout<TValue, TOperationResult> TDataLayout, NProust::NodeTopology TNodeTopology>
-void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer) {
+template<class TValue, class TOperationResult, class TOperation, NProust::DataLayout<TValue, TOperationResult> TDataLayout, NProust::NodeTopology TNodeTopology, size_t LeafSizeLog>
+void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer, NProust::EBaseGeneratorType baseGeneratorType) {
     std::vector<TWeightedDurations> weightedDurations;
     std::vector<size_t> cyclesSetValue(MAX_CYCLES_PER_OPERATION, 0);
     std::vector<size_t> cyclesComputeRange(MAX_CYCLES_PER_OPERATION, 0);
 
-    auto engine = NProust::CreateRobustRangeUpdateEngine<TValue, TOperationResult, TOperation, TNodeTopology, TDataLayout>();
+    std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation>> rangeUpdateEngine;
+    std::unique_ptr<NProust::IPointUpdateEngine<TValue, TOperationResult, TOperation>> pointUpdateEngine;
     {
         const auto initStartedAt = std::chrono::high_resolution_clock::now();
-        engine->Init(streamer.GetLength());
+        switch (baseGeneratorType) {
+            case (NProust::EBaseGeneratorType::Point): {
+                spdlog::info("Using a point-update engine");
+                pointUpdateEngine = NProust::CreateRobustPointUpdateEngine<TValue, TOperationResult, TOperation, LeafSizeLog>();
+                pointUpdateEngine->Init(streamer.GetLength());
+                break;
+            }
+            case (NProust::EBaseGeneratorType::Range): {
+                spdlog::info("Using a range-update engine");
+                rangeUpdateEngine = NProust::CreateRobustRangeUpdateEngine<TValue, TOperationResult, TOperation, TNodeTopology, TDataLayout>();
+                rangeUpdateEngine->Init(streamer.GetLength());
+                break;
+            }
+        }
+
         const auto initDoneAt = std::chrono::high_resolution_clock::now();
         const auto initDuration = std::chrono::duration_cast<std::chrono::milliseconds>(initDoneAt - initStartedAt).count();
         spdlog::info("Structure initialization done in {} ms", initDuration);
     }    
-    
+
     size_t readCount = 0;
     bool isDatasetExhausted = false;
     const auto runStartedAt = std::chrono::high_resolution_clock::now();
@@ -289,7 +307,16 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
             switch (planItem.Operation) {
                 case NProust::EEngineOperation::SetRange: {
                     const auto startCycle = StartRDTSC();
-                    engine->SetRange(planItem.Left, planItem.Right, *planItem.Value);
+                    switch (baseGeneratorType) {
+                        case (NProust::EBaseGeneratorType::Point): {
+                            pointUpdateEngine->SetPoint(planItem.Left, *planItem.Value);
+                            break;
+                        }
+                        case (NProust::EBaseGeneratorType::Range): {
+                            rangeUpdateEngine->SetRange(planItem.Left, planItem.Right, *planItem.Value);
+                            break;
+                        }
+                    }
                     const auto endCycle = EndRDTSC();
                     const auto totalCycles = std::min(endCycle - startCycle, MAX_CYCLES_PER_OPERATION - 1);
                     if (warmupIsDone) {
@@ -299,7 +326,17 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
                 }
                 case NProust::EEngineOperation::Query: {
                     const auto startCycle = StartRDTSC();
-                    const auto result = engine->ComputeRange(planItem.Left, planItem.Right);
+                    TOperationResult result;
+                    switch (baseGeneratorType) {
+                        case (NProust::EBaseGeneratorType::Point): {
+                            result = pointUpdateEngine->ComputeRange(planItem.Left, planItem.Right);
+                            break;
+                        }
+                        case (NProust::EBaseGeneratorType::Range): {
+                            result = rangeUpdateEngine->ComputeRange(planItem.Left, planItem.Right);
+                            break;
+                        }
+                    }
                     const auto endCycle = EndRDTSC();
                     const auto totalCycles = std::min(endCycle - startCycle, MAX_CYCLES_PER_OPERATION - 1);
                     if (warmupIsDone) {
@@ -373,6 +410,7 @@ int main(int argc, char* argv[]) {
     std::optional<NProust::EDataLayout> dataLayout;
     std::optional<NProust::ENodeTopology> nodeTopology;
     std::optional<size_t> leafSizeLog;
+    std::optional<NProust::EBaseGeneratorType> baseGeneratorType;
     bool withSentinel = false;
 
     for (auto it = args.begin() + 1; it != args.end(); ++it) {
@@ -389,6 +427,8 @@ int main(int argc, char* argv[]) {
             ParseIntegralArgument(it, args.end(), leafSizeLog);
         } else if (arg == WITH_SENTINEL_PARAM) {
             withSentinel = true;
+        } else if (arg == GENERATOR_TYPE_PARAM) {
+            ParseBaseGeneratorTypeArgument(it, args.end(), baseGeneratorType);
         } else {
             spdlog::critical("Unknown argument: {}", arg);
             std::terminate();
@@ -400,14 +440,15 @@ int main(int argc, char* argv[]) {
     CheckFieldPresence(DATA_LAYOUT_PARAM, dataLayout);
     CheckFieldPresence(NODE_TOPOLOGY_PARAM, nodeTopology);
     CheckFieldPresence(LEAF_SIZE_LOG_PARAM, leafSizeLog);
+    CheckFieldPresence(GENERATOR_TYPE_PARAM, baseGeneratorType);
 
     switch (*datasetType) {
         case NProust::EDatasetType::SumInt32: {
             auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, int32_t>(*datasetFn);
             if (withSentinel) {
-                RunDatasetWithSettings<int32_t, int32_t, NProust::TSumOperation, INT32_SENTINEL>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog);
+                RunDatasetWithSettings<int32_t, int32_t, NProust::TSumOperation, INT32_SENTINEL>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType);
             } else {
-                RunDatasetWithSettings<int32_t, int32_t, NProust::TSumOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog);
+                RunDatasetWithSettings<int32_t, int32_t, NProust::TSumOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType);
             }
             break;
         }
@@ -417,7 +458,7 @@ int main(int argc, char* argv[]) {
                 spdlog::critical("Sentinel values are not supported for this type of the dataset");
                 std::terminate();
             } else {
-                RunDatasetWithSettings<int32_t, int32_t, NProust::TMaxOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog);
+                RunDatasetWithSettings<int32_t, int32_t, NProust::TMaxOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType);
             }
             break;
         }
@@ -428,14 +469,16 @@ int main(int argc, char* argv[]) {
                     datasetStreamer,
                     *dataLayout,
                     *nodeTopology,
-                    *leafSizeLog
+                    *leafSizeLog,
+                    *baseGeneratorType
                 );
             } else {
                 RunDatasetWithSettings<int32_t, NProustExamples::TMaxSumState, NProustExamples::TMaxSumStateOperation>(
                     datasetStreamer,
                     *dataLayout,
                     *nodeTopology,
-                    *leafSizeLog
+                    *leafSizeLog,
+                    *baseGeneratorType
                 );
             }
             break;
@@ -450,7 +493,8 @@ int main(int argc, char* argv[]) {
                     datasetStreamer,
                     *dataLayout,
                     *nodeTopology,
-                    *leafSizeLog
+                    *leafSizeLog,
+                    *baseGeneratorType
                 );
             }
             break;

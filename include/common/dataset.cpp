@@ -35,9 +35,17 @@ namespace NProust {
         return std::nullopt;
     }
 
-    void GenerateDataset(const EDatasetType type, const size_t length, const size_t queryCount, const std::string fname) {
-        auto baseGenerator = TRangeUpdatePlanGenerator(length);
+    std::optional<EBaseGeneratorType> BaseGeneratorTypeFromString(const std::string_view s) {
+        if (s == "Point") {
+            return EBaseGeneratorType::Point;
+        }
+        if (s == "Range") {
+            return EBaseGeneratorType::Range;
+        }
+        return std::nullopt;
+    }
 
+    void GenerateDataset(const EDatasetType type, const size_t length, const size_t queryCount, const std::string fname, ITestPlanBaseGenerator& baseGenerator) {
         switch (type) {
             case EDatasetType::SumInt32: {
                 GenerateTestPlanIntoFile<int32_t, int32_t, NProust::TSumOperation>(

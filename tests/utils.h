@@ -55,6 +55,8 @@ void StressTest(
         }
         ++queriesProcessed;
         const auto planItem = *maybeItem;
+        assert(planItem.Left <= planItem.Right && "Incorrect test plan: Left >= Right");
+        assert(planItem.Right <= length && "Incorrect test plan: the Right endpoint is out of bounds");
         switch (planItem.Operation) {
             case NProust::EEngineOperation::SetRange: {
                 EXPECT_TRUE(planItem.Value.has_value());
