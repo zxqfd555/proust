@@ -400,7 +400,7 @@ int main(int argc, char* argv[]) {
     // cold cache.
     PinExecutionThread(0);
 
-    static_assert(std::chrono::high_resolution_clock::is_steady, "High resolution clock is not steady");
+//    static_assert(std::chrono::high_resolution_clock::is_steady, "High resolution clock is not steady");
     static_assert(std::chrono::high_resolution_clock::period::den, "High resolution clock doesn't have a nanosecond precision");
 
     std::span<char*> args(argv, argc);

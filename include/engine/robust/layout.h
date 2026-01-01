@@ -29,6 +29,10 @@ namespace NProust {
 
     template<class TValue>
     class TLazyTag<TValue, void> {
+    private:
+        TValue Value;
+	[[no_unique_address]] bool IsDefined = false;
+
     public:
         TLazyTag() = default;
 
@@ -57,14 +61,13 @@ namespace NProust {
         void Drop() noexcept {
             IsDefined = false;
         }
-
-    private:
-        TValue Value;
-        [[no_unique_address]] bool IsDefined = false;
     };
 
     template<class TValue, TValue Sentinel>
     class TLazyTag<TValue, std::integral_constant<TValue, Sentinel>> {
+    private:
+        TValue Value = Sentinel;
+
     public:
         TLazyTag() = default;
 
@@ -90,9 +93,6 @@ namespace NProust {
         void Drop() noexcept {
             Value = Sentinel;
         }
-    
-    private:
-        TValue Value = Sentinel;
     };
 
     template<class TValue, class TOperationResult, auto Sentinel = std::nullopt>

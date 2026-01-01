@@ -21,7 +21,7 @@ else()
         $<$<CONFIG:Release>:-ffast-math>
         $<$<CONFIG:Release>:-fno-rtti>
     )
-    add_link_options($<$<CONFIG:Release>:-fuse-ld=lld>)
+#    add_link_options($<$<CONFIG:Release>:-fuse-ld=lld>)
 endif()
 
 find_package(spdlog CONFIG REQUIRED)
