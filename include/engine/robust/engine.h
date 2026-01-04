@@ -207,13 +207,15 @@ namespace NProust {
         static constexpr size_t ROOT_NODE_ID = 1;
         static constexpr size_t CHILDREN_COUNT = 1 << BranchingLog;
         static constexpr size_t INDEX_SHIFT_FOR_PARENT_CALCULATION = CHILDREN_COUNT - 2;
+        static constexpr size_t LEFTMOST_CHILD_INDEX = BranchingLog == 1 ? 0 : 2;
 
     public:
         static_assert(BranchingLog > 0, "BranchingLog must be strictly positive");
 
         virtual void Init(const size_t length) override {
             // Overbook capacities up to the closest power of two
-            AllocatedLength = std::bit_ceil(length);
+            // Here, length + 1 is used, in order to avoid branching in ComputePrefixBackwards
+            AllocatedLength = std::bit_ceil((length + 1));
             if (AllocatedLength < CHILDREN_COUNT) {
                 AllocatedLength = CHILDREN_COUNT;
             }
@@ -252,7 +254,7 @@ namespace NProust {
 
             auto currentNode = BottomLayerStart + (position >> LeafSizeLog);
             while (currentNode >= ROOT_NODE_ID) {
-                for (size_t index = currentNode + 1; (index & (CHILDREN_COUNT - 1)) != 2; ++index) {
+                for (size_t index = currentNode + 1; (index & (CHILDREN_COUNT - 1)) != LEFTMOST_CHILD_INDEX; ++index) {
                     NodeValues[index] = TOperation::Merge(NodeValues[index], delta);
                 }
                 currentNode = (currentNode + INDEX_SHIFT_FOR_PARENT_CALCULATION) >> BranchingLog;

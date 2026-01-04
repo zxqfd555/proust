@@ -42,7 +42,7 @@ void TestFatEngineExhaustively(std::function<TValue(std::mt19937&)> valueGenerat
     // Test small lengths to catch the bugs around the corner cases
     // Test larger length to ensure larger sizes are processed correctly
     std::vector<size_t> testedLengths;
-    for (size_t length = 1; length <= 16; ++length) {
+    for (size_t length = 1; length <= 100; ++length) {
         testedLengths.push_back(length);
     }
     testedLengths.push_back(1000);
