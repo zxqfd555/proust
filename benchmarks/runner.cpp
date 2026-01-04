@@ -43,7 +43,7 @@ constexpr int32_t INT32_SENTINEL = std::numeric_limits<int32_t>::max();
 
 const double WARMUP_DATASET_SHARE = 0.05;
 const size_t QUERY_BATCH_SIZE = 100;
-const size_t MAX_CYCLES_PER_OPERATION = 10000000;
+const size_t MAX_CYCLES_PER_OPERATION = 100000;
 
 struct TPercentile {
     const size_t Numerator;
@@ -278,12 +278,14 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
     }    
 
     size_t readCount = 0;
+    std::chrono::nanoseconds runTimeElapsed(0);
     bool isDatasetExhausted = false;
     const auto runStartedAt = std::chrono::high_resolution_clock::now();
     const auto warmupUntilEventId = (size_t)(WARMUP_DATASET_SHARE * streamer.GetQueryCount());
+    std::vector<NProust::TTestPlanItem<TValue, TOperationResult>> datasetChunk;
+    datasetChunk.reserve(QUERY_BATCH_SIZE);
     while (!isDatasetExhausted) {
-        std::vector<NProust::TTestPlanItem<TValue, TOperationResult>> datasetChunk;
-        datasetChunk.reserve(QUERY_BATCH_SIZE);
+        datasetChunk.clear();
         while (datasetChunk.size() < QUERY_BATCH_SIZE) {
             auto maybeItem = streamer.NextQuery();
             if (!maybeItem.has_value()) {
@@ -302,46 +304,58 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
         }
         const bool warmupIsDone = warmupUntilEventId < readCount;
 
+        // Allocate some of the variables beforehand, so that their repeated allocation in the cycle doesn't
+        // affect the batch timing.
+        TOperationResult result;
+        uint64_t startCycle = 0;
+        uint64_t endCycle = 0;
+        uint64_t totalCycles = 0;
+
+        // We write into preallocated buffers because it's faster than random jumps over the histogram vectors
+        // Therefore we remove a bit of non-related noise from the measurement
+        // The data from the buffers is added into histograms outside of the timed section
+        std::vector<uint64_t> batchSetValueCycles;
+        std::vector<uint64_t> batchComputeValueCycles;
+        batchSetValueCycles.reserve(datasetChunk.size());
+        batchComputeValueCycles.reserve(datasetChunk.size());
+
         const auto batchRunStartedAt = std::chrono::high_resolution_clock::now();
         for (const auto& planItem : datasetChunk) {
             switch (planItem.Operation) {
                 case NProust::EEngineOperation::SetRange: {
-                    const auto startCycle = StartRDTSC();
                     switch (baseGeneratorType) {
                         case (NProust::EBaseGeneratorType::Point): {
+                            startCycle = StartRDTSC();
                             pointUpdateEngine->SetPoint(planItem.Left, *planItem.Value);
+                            endCycle = EndRDTSC();
                             break;
                         }
                         case (NProust::EBaseGeneratorType::Range): {
+                            startCycle = StartRDTSC();
                             rangeUpdateEngine->SetRange(planItem.Left, planItem.Right, *planItem.Value);
+                            endCycle = EndRDTSC();
                             break;
                         }
                     }
-                    const auto endCycle = EndRDTSC();
-                    const auto totalCycles = std::min(endCycle - startCycle, MAX_CYCLES_PER_OPERATION - 1);
-                    if (warmupIsDone) {
-                        cyclesSetValue[totalCycles] += 1;
-                    }
+                    batchSetValueCycles.push_back(endCycle - startCycle);
                     break;
                 }
                 case NProust::EEngineOperation::Query: {
-                    const auto startCycle = StartRDTSC();
-                    TOperationResult result;
                     switch (baseGeneratorType) {
                         case (NProust::EBaseGeneratorType::Point): {
+                            startCycle = StartRDTSC();
                             result = pointUpdateEngine->ComputeRange(planItem.Left, planItem.Right);
+                            endCycle = EndRDTSC();
                             break;
                         }
                         case (NProust::EBaseGeneratorType::Range): {
+                            startCycle = StartRDTSC();
                             result = rangeUpdateEngine->ComputeRange(planItem.Left, planItem.Right);
+                            endCycle = EndRDTSC();
                             break;
                         }
                     }
-                    const auto endCycle = EndRDTSC();
-                    const auto totalCycles = std::min(endCycle - startCycle, MAX_CYCLES_PER_OPERATION - 1);
-                    if (warmupIsDone) {
-                        cyclesComputeRange[totalCycles] += 1;
-                    }
+                    batchComputeValueCycles.push_back(endCycle - startCycle);
                     if (result != *planItem.ExpectedResult) {
                         spdlog::critical("The implementation is incorrect: the benchmark doesn't make sense.");
                         std::terminate();
@@ -351,17 +365,24 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
             };
         }
         const auto batchRunFinishedAt = std::chrono::high_resolution_clock::now();
-        const auto avgPerQueryInBatch = std::chrono::duration_cast<std::chrono::nanoseconds>(batchRunFinishedAt - batchRunStartedAt).count() / datasetChunk.size();
+        const auto batchTimeElapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(batchRunFinishedAt - batchRunStartedAt);
+        const auto avgPerQueryInBatch = batchTimeElapsed.count() / datasetChunk.size();
 
         if (warmupIsDone) {
             weightedDurations.emplace_back((uint32_t)datasetChunk.size(), (uint32_t)avgPerQueryInBatch);
+            for (const auto element : batchSetValueCycles) {
+                ++cyclesSetValue[std::min(element, MAX_CYCLES_PER_OPERATION - 1)];
+            }
+            for (const auto element : batchComputeValueCycles) {
+                ++cyclesComputeRange[std::min(element, MAX_CYCLES_PER_OPERATION - 1)];
+            }
+            runTimeElapsed += batchTimeElapsed;
         }
     }
 
-    const auto runFinishedAt = std::chrono::high_resolution_clock::now();
-    const auto runTimeElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(runFinishedAt - runStartedAt);
-    const auto durationPerQuery = std::chrono::duration_cast<std::chrono::nanoseconds>(runFinishedAt - runStartedAt).count() / readCount;
-    spdlog::info("The run has finished successfully. {} queries processed in {} ms ({} ns on average per query)", readCount, runTimeElapsed.count(), durationPerQuery);
+    const auto durationPerQuery = runTimeElapsed.count() / readCount;
+    const auto runTimeElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(runTimeElapsed).count();
+    spdlog::info("The run has finished successfully. {} queries processed in {} ms ({} ns on average per query)", readCount, runTimeElapsedMs, durationPerQuery);
 
     std::sort(weightedDurations.begin(), weightedDurations.end(), [](const auto& lhs, const auto& rhs) {return lhs.AvgDuration < rhs.AvgDuration;});
     spdlog::info("Peak memory usage: {} Kb", GetPeakMemoryUsageKB());
@@ -400,7 +421,7 @@ int main(int argc, char* argv[]) {
     // cold cache.
     PinExecutionThread(0);
 
-//    static_assert(std::chrono::high_resolution_clock::is_steady, "High resolution clock is not steady");
+    static_assert(std::chrono::high_resolution_clock::is_steady, "High resolution clock is not steady");
     static_assert(std::chrono::high_resolution_clock::period::den, "High resolution clock doesn't have a nanosecond precision");
 
     std::span<char*> args(argv, argc);

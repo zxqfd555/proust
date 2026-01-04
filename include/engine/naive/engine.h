@@ -13,19 +13,15 @@ namespace NProust {
     public:
         TNaiveRangeUpdateEngine() = default;
 
-        virtual TVersion Init(const size_t length) override {
+        virtual void Init(const size_t length) override {
             Elements = std::vector<TOperationResult>(length, TOperationResult());
-            CurrentVersion += 1;
-            return CurrentVersion;
         }
 
-        virtual TVersion SetRange(const size_t rangeStart, const size_t rangeEnd, const TValue& value) override {
+        virtual void SetRange(const size_t rangeStart, const size_t rangeEnd, const TValue& value) override {
             assert(rangeStart <= rangeEnd && "The range start must be smaller than its end");
             assert(rangeEnd <= Elements.size() && "The range goes beyond the allocated capacity");
             const auto element = TOperation::template Repeat<TValue, TOperationResult>(value, 1);
             std::fill(Elements.begin() + rangeStart, Elements.begin() + rangeEnd, element);
-            CurrentVersion += 1;
-            return CurrentVersion;
         }
 
         virtual TOperationResult ComputeRange(const size_t rangeStart, const size_t rangeEnd) const override {
@@ -40,7 +36,6 @@ namespace NProust {
         }
 
     private:
-        TVersion CurrentVersion{0};
         std::vector<TOperationResult> Elements;
     };
 

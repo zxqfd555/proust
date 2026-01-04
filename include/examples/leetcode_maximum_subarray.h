@@ -66,15 +66,13 @@ namespace NProustExamples {
     // An implementation of IEngine, adapted to be used as a dataset generator.
     class TNaiveMaxSumEngine: public NProust::IRangeUpdateEngine<int32_t, TMaxSumState, TMaxSumStateOperation> {
     public:
-        virtual NProust::TVersion Init(const size_t length) override {
+        virtual void Init(const size_t length) override {
             Elements.resize(length);
             std::fill(Elements.begin(), Elements.end(), 0);
-            return 0;  // no recovery is needed, hence ignoring
         }
 
-        virtual NProust::TVersion SetRange(const size_t left, const size_t right, const int32_t& value) override {
+        virtual void SetRange(const size_t left, const size_t right, const int32_t& value) override {
             std::fill(Elements.begin() + left, Elements.begin() + right, value);
-            return 0;
         }
 
         virtual TMaxSumState ComputeRange(const size_t left, const size_t right) const override {

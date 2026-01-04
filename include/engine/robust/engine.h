@@ -4,6 +4,8 @@
 #include <vector>
 #include <optional>
 
+#include <spdlog/spdlog.h>
+
 #include "../interface.h"
 #include "layout.h"
 #include "topology.h"
@@ -22,7 +24,7 @@ namespace NProust {
         const size_t ROOT_NODE_ID = 0;
 
     public:
-        virtual TVersion Init(const size_t length) override {
+        virtual void Init(const size_t length) override {
             Nodes.ReserveCapacities(TNodeTopology::CapacityToReserve(length));
             if (TNodeTopology::IsLeaf(2)) {
                 // If the leaf size is one, there is no need for an extra allocation.
@@ -30,20 +32,17 @@ namespace NProust {
                 TOperationResult defaultSnapshotValue = TOperation::template Repeat<TValue, TOperationResult>(TValue(), 1);
                 std::fill(LazySnapshot.begin(), LazySnapshot.end(), defaultSnapshotValue);
             }
-            InitNodes(ROOT_NODE_ID, 0, length);
             AllocatedLength = length;
-            return CurrentVersion++;
+            InitNodes(ROOT_NODE_ID, 0, length);
         }
 
-        virtual TVersion SetRange(const size_t rangeStart, const size_t rangeEnd, const TValue& value) override {
+        virtual void SetRange(const size_t rangeStart, const size_t rangeEnd, const TValue& value) override {
             assert(rangeStart <= rangeEnd && "Range start can't be bigger than its end");
             assert(rangeEnd <= AllocatedLength && "Range goes beyond the allocated length");
 
             if (rangeStart < rangeEnd) [[likely]] {
                 ModifyNodes(ROOT_NODE_ID, rangeStart, rangeEnd, 0, AllocatedLength, value);
             }
-
-            return CurrentVersion++;
         }
 
         virtual TOperationResult ComputeRange(const size_t rangeStart, const size_t rangeEnd) const override {
@@ -57,7 +56,6 @@ namespace NProust {
         TLayout Nodes;
         std::vector<TOperationResult> LazySnapshot;
         size_t AllocatedLength = 0;
-        TVersion CurrentVersion = 0;
 
         void InitNodes(const size_t currentNodeId, const size_t nodeStart, const size_t nodeEnd) {
             Nodes.SetSubtreeValue(currentNodeId, TOperation::template Repeat<TValue, TOperationResult>(TValue(), nodeEnd - nodeStart));
@@ -105,7 +103,7 @@ namespace NProust {
                     std::fill(LazySnapshot.begin() + segmentStart, LazySnapshot.begin() + segmentEnd, modifyValue);
 
                     TOperationResult subtreeValue = LazySnapshot[nodeStart];
-                    if (segmentStart > nodeStart) {
+                    if (segmentStart > nodeStart) {  // TODO: MergeMany usage
                         for (size_t index = nodeStart + 1; index < segmentStart; ++index) {
                             subtreeValue = TOperation::Merge(subtreeValue, LazySnapshot[index]);
                         }
@@ -166,7 +164,7 @@ namespace NProust {
                 const size_t segmentStart = std::max(rangeStart, nodeStart);
                 const size_t segmentEnd = std::min(rangeEnd, nodeEnd);
                 auto result = LazySnapshot[segmentStart];
-                for (size_t index = segmentStart + 1; index < segmentEnd; ++index) {
+                for (size_t index = segmentStart + 1; index < segmentEnd; ++index) {  // TODO: MergeMany
                     result = TOperation::Merge(result, LazySnapshot[index]);
                 }
                 return result;
@@ -202,7 +200,118 @@ namespace NProust {
         return std::make_unique<TRobustRangeUpdateEngine<TValue, TOperationResult, TOperation, TNodeTopology, TLayout>>();
     }
 
-    template<typename TValue, typename TOperationResult, typename TOperation, size_t LeafSizeLog = 0>
+    template<typename TValue, typename TOperationResult, typename TOperation, size_t BranchingLog = 1>
+    requires ValidOperation<TOperation, TValue, TOperationResult> && HasUndo<TOperation, TOperationResult>
+    class TFatPointUpdateEngine: public IPointUpdateEngine<TValue, TOperationResult, TOperation> {
+    private:
+        static constexpr size_t ROOT_NODE_ID = 1;
+        static constexpr size_t CHILDREN_COUNT = 1 << BranchingLog;
+        static constexpr size_t INDEX_SHIFT_FOR_PARENT_CALCULATION = CHILDREN_COUNT - 2;
+
+    public:
+        static_assert(BranchingLog > 0, "BranchingLog must be strictly positive");
+
+        virtual void Init(const size_t length) override {
+            // Overbook capacities up to the closest power of two
+            AllocatedLength = std::bit_ceil(length);
+            if (AllocatedLength < CHILDREN_COUNT) {
+                AllocatedLength = CHILDREN_COUNT;
+            }
+
+            size_t totalNodes = 1;
+            size_t nodesInCurrentLayer = 1;
+            size_t nodesUnderOneLeaf = AllocatedLength;
+            while (nodesUnderOneLeaf > CHILDREN_COUNT) {
+                totalNodes += nodesInCurrentLayer <<= BranchingLog;
+                nodesUnderOneLeaf >>= BranchingLog;
+            }
+
+            LeafSize = nodesUnderOneLeaf;
+            LeafSizeLog = std::countr_zero(LeafSize);
+            assert((1 << LeafSizeLog) == LeafSize);
+            {
+                PointValues.resize(AllocatedLength);
+                const auto defaultValue = TOperation::template Repeat<TValue, TOperationResult>(TValue(), 1);
+                std::fill(PointValues.begin(), PointValues.end(), defaultValue);
+            }
+
+            NodeValues.resize(totalNodes + 1);  // +1 for 1-indexing
+            BottomLayerStart = NodeValues.size() - (AllocatedLength >> LeafSizeLog);
+
+            for (size_t nodeIndex = totalNodes; nodeIndex > 0; --nodeIndex) {
+                if ((nodeIndex << BranchingLog) > totalNodes) {
+                    NodeValues[nodeIndex] = TOperation::template Repeat<TValue, TOperationResult>(TValue(), LeafSize);
+                    continue;
+                }
+            }
+        }
+
+        virtual void SetPoint(const size_t position, const TValue& value) override {
+            const auto delta = TOperation::Undo(value, PointValues[position]);
+            PointValues[position] = TOperation::template Repeat<TValue, TOperationResult>(value, 1);
+
+            auto currentNode = BottomLayerStart + (position >> LeafSizeLog);
+            while (currentNode >= ROOT_NODE_ID) {
+                for (size_t index = currentNode + 1; (index & (CHILDREN_COUNT - 1)) != 2; ++index) {
+                    NodeValues[index] = TOperation::Merge(NodeValues[index], delta);
+                }
+                currentNode = (currentNode + INDEX_SHIFT_FOR_PARENT_CALCULATION) >> BranchingLog;
+            }
+        }
+
+        virtual TOperationResult ComputeRange(const size_t rangeStart, const size_t rangeEnd) const {
+            if (rangeStart + (CHILDREN_COUNT << 1) > rangeEnd) [[unlikely]] {
+                return ComputeRangeBruteForce(rangeStart, rangeEnd);
+            }
+
+            const auto fullPrefix = ComputePrefixBackwards(rangeEnd);
+            if (rangeStart == 0) [[unlikely]] {
+                return fullPrefix;
+            }
+            const auto partialPrefix = ComputePrefixBackwards(rangeStart);
+            return TOperation::Undo(fullPrefix, partialPrefix);
+        }
+
+    private:
+        std::vector<TOperationResult> NodeValues;
+        std::vector<TOperationResult> PointValues;
+        size_t AllocatedLength = 0;
+        size_t LeafSize = 0;
+        size_t LeafSizeLog = 0;
+        size_t BottomLayerStart = 0;
+
+        inline TOperationResult ComputeRangeBruteForce(const size_t rangeStart, const size_t rangeEnd) const {
+            if constexpr (HasMergeMany<TOperation, TOperationResult>) {
+                return TOperation::MergeMany(PointValues.data(), rangeStart, rangeEnd);
+            } else {
+                auto result = PointValues[rangeStart];
+                for (size_t index = rangeStart + 1; index < rangeEnd; ++index) {
+                    result = TOperation::Merge(result, PointValues[index]);
+                }
+                return result;
+            }
+        }
+
+        inline TOperationResult ComputePrefixBackwards(const size_t prefix) const {
+            TOperationResult result;            
+
+            size_t currentNode = BottomLayerStart + (prefix >> LeafSizeLog);
+            if (prefix & (LeafSize - 1)) [[likely]] {
+                result = ComputeRangeBruteForce(prefix & ~(LeafSize - 1), prefix);
+            } else {
+                result = NodeValues[currentNode];
+                currentNode = (currentNode + INDEX_SHIFT_FOR_PARENT_CALCULATION) >> BranchingLog;
+            }
+
+            while (currentNode > ROOT_NODE_ID) {
+                result = TOperation::Merge(NodeValues[currentNode], result);
+                currentNode = (currentNode + INDEX_SHIFT_FOR_PARENT_CALCULATION) >> BranchingLog;
+            }
+            return result;
+        }
+    };
+
+    template<typename TValue, typename TOperationResult, typename TOperation, size_t LeafSizeLog = 1>
     class TRobustPointUpdateEngine: public IPointUpdateEngine<TValue, TOperationResult, TOperation> {
     private:
         // We use 1-indexing here: although not as nice, it allows us a bit cheaper topology operations
@@ -211,9 +320,12 @@ namespace NProust {
         static constexpr size_t LEAF_SIZE = 1 << LeafSizeLog;
     
     public:
-        virtual TVersion Init(const size_t length) override {
+        virtual void Init(const size_t length) override {
             // Overbook capacities up to the closest power of two
             AllocatedLength = std::bit_ceil(length);
+            if (AllocatedLength < LEAF_SIZE) {
+                AllocatedLength = LEAF_SIZE;
+            }
 
             // Being a power of two, the tree takes 2x nodes from the length
             NodeValues.resize(AllocatedLength << 1);
@@ -224,22 +336,33 @@ namespace NProust {
             for (size_t index = AllocatedLength - 1; index >= 1; --index) {
                 NodeValues[index] = TOperation::Merge(NodeValues[(index << 1)], NodeValues[(index << 1) + 1]);
             }
-            return CurrentVersion++;
         }
 
-        virtual TVersion SetPoint(const size_t position, const TValue& value) override {
+        virtual void SetPoint(const size_t position, const TValue& value) override {
             assert(position < AllocatedLength && "The position is beyond the allocated size");
             size_t nodePosition = AllocatedLength + position;
-            NodeValues[nodePosition] = TOperation::template Repeat<TValue, TOperationResult>(value, 1);
 
             const size_t largeLeafStart = position & ~(LEAF_SIZE - 1);
-            NodeValues[nodePosition >>= LeafSizeLog] = ComputeRangeBruteForce(largeLeafStart, largeLeafStart + LEAF_SIZE);
-            
+
+            if constexpr (HasUndo<TOperation, TOperationResult>) {
+                const auto oldValue = NodeValues[nodePosition];
+                NodeValues[nodePosition] = TOperation::template Repeat<TValue, TOperationResult>(value, 1);
+                if constexpr (LeafSizeLog > 0) {
+                    nodePosition >>= LeafSizeLog;
+                    const auto oldValueUndone = TOperation::Undo(NodeValues[nodePosition], oldValue);
+                    NodeValues[nodePosition] = TOperation::Merge(oldValueUndone, TOperation::template Repeat<TValue, TOperationResult>(value, 1));
+                }
+            } else {
+                NodeValues[nodePosition] = TOperation::template Repeat<TValue, TOperationResult>(value, 1);
+                if constexpr (LeafSizeLog > 0) {
+                    NodeValues[nodePosition >>= LeafSizeLog] = ComputeRangeBruteForce(largeLeafStart, largeLeafStart + LEAF_SIZE);
+                }
+            }
+
             while (nodePosition > 1) {
                 NodeValues[nodePosition >> 1] = TOperation::Merge(NodeValues[nodePosition & ~1], NodeValues[nodePosition | 1]);
                 nodePosition >>= 1;
             }
-            return CurrentVersion++;
         }
 
         virtual TOperationResult ComputeRange(const size_t rangeStart, const size_t rangeEnd) const override {
@@ -247,29 +370,38 @@ namespace NProust {
             assert(rangeStart != rangeEnd && "The operation result for an empty set is undefined");
             assert(rangeEnd <= AllocatedLength && "Range goes beyond the allocated length");
 
-            const auto alignedStart = ((rangeStart + LEAF_SIZE - 1) >> LeafSizeLog) << LeafSizeLog;
-            const auto alignedEnd = (rangeEnd >> LeafSizeLog) << LeafSizeLog;
-            if (alignedStart >= alignedEnd) [[unlikely]] {
-                return ComputeRangeBruteForce(rangeStart, rangeEnd);
-            }
-
-            const auto centralResult = ComputeAlignedRange(alignedStart, alignedEnd);
-            if (alignedStart > rangeStart) [[likely]] {
-                const auto leftOffcutResult = ComputeRangeBruteForce(rangeStart, alignedStart);
-                const auto leftCenterResult = TOperation::Merge(leftOffcutResult, centralResult);
-
-                if (alignedEnd < rangeEnd) [[likely]] {
-                    const auto rightOffcutResult = ComputeRangeBruteForce(alignedEnd, rangeEnd);
-                    return TOperation::Merge(leftCenterResult, rightOffcutResult);
-                } else {
-                    return leftCenterResult;
+            if constexpr (HasUndo<TOperation, TOperationResult>) {
+                const auto fullPrefixResult = ComputePrefixUnaligned(rangeEnd);
+                if (rangeStart == 0) [[unlikely]] {
+                    return fullPrefixResult;
                 }
+                const auto irrelevantPrefixResult = ComputePrefixUnaligned(rangeStart);
+                return TOperation::Undo(fullPrefixResult, irrelevantPrefixResult);
             } else {
-                if (alignedEnd < rangeEnd) [[likely]] {
-                    const auto rightOffcutResult = ComputeRangeBruteForce(alignedEnd, rangeEnd);
-                    return TOperation::Merge(centralResult, rightOffcutResult);
+                const auto alignedStart = ((rangeStart + LEAF_SIZE - 1) >> LeafSizeLog) << LeafSizeLog;
+                const auto alignedEnd = (rangeEnd >> LeafSizeLog) << LeafSizeLog;
+                if (alignedStart >= alignedEnd) [[unlikely]] {
+                    return ComputeRangeBruteForce(rangeStart, rangeEnd);
+                }
+
+                const auto centralResult = ComputeAlignedRange(alignedStart, alignedEnd);
+                if (alignedStart > rangeStart) [[likely]] {
+                    const auto leftOffcutResult = ComputeRangeBruteForce(rangeStart, alignedStart);
+                    const auto leftCenterResult = TOperation::Merge(leftOffcutResult, centralResult);
+
+                    if (alignedEnd < rangeEnd) [[likely]] {
+                        const auto rightOffcutResult = ComputeRangeBruteForce(alignedEnd, rangeEnd);
+                        return TOperation::Merge(leftCenterResult, rightOffcutResult);
+                    } else {
+                        return leftCenterResult;
+                    }
                 } else {
-                    return centralResult;
+                    if (alignedEnd < rangeEnd) [[likely]] {
+                        const auto rightOffcutResult = ComputeRangeBruteForce(alignedEnd, rangeEnd);
+                        return TOperation::Merge(centralResult, rightOffcutResult);
+                    } else {
+                        return centralResult;
+                    }
                 }
             }
         }
@@ -277,15 +409,35 @@ namespace NProust {
     private:
         std::vector<TOperationResult> NodeValues;
         size_t AllocatedLength;
-        TVersion CurrentVersion = 0;
 
         inline TOperationResult ComputeRangeBruteForce(const size_t rangeStart, const size_t rangeEnd) const {
             assert(rangeStart < rangeEnd);
-            auto result = NodeValues[AllocatedLength + rangeStart];
-            for (size_t index = AllocatedLength + rangeStart + 1; index < AllocatedLength + rangeEnd; ++index) {
-                result = TOperation::Merge(result, NodeValues[index]);
+            if constexpr (HasMergeMany<TOperation, TOperationResult>) {
+                return TOperation::MergeMany(NodeValues.data(), AllocatedLength + rangeStart, AllocatedLength + rangeEnd);
+            } else {
+                auto result = NodeValues[AllocatedLength + rangeStart];
+                for (size_t index = AllocatedLength + rangeStart + 1; index < AllocatedLength + rangeEnd; ++index) {
+                    result = TOperation::Merge(result, NodeValues[index]);
+                }
+                return result;
             }
-            return result;
+        }
+
+        inline TOperationResult ComputePrefixUnaligned(const size_t prefix) const {
+            const auto alignedBorder = (prefix >> LeafSizeLog) << LeafSizeLog;
+            if (alignedBorder == 0) [[unlikely]] {
+                return ComputeRangeBruteForce(0, prefix);
+            }
+
+            const auto mainResult = ComputeRangeBackwards(AllocatedLength, alignedBorder);
+            if constexpr (LeafSizeLog == 0) {
+                return mainResult;
+            }
+
+            if (alignedBorder == prefix) [[unlikely]] {
+                return mainResult;
+            }
+            return TOperation::Merge(mainResult, ComputeRangeBruteForce(alignedBorder, prefix));
         }
 
         inline TOperationResult ComputeAlignedRange(const size_t rangeStart, const size_t rangeEnd) const {
@@ -340,7 +492,7 @@ namespace NProust {
             return ComputeRangeBackwards(currentNode, queryLength);
         }
 
-        inline TOperationResult ComputeRangeBackwards(size_t& currentNode, size_t& queryLength) const {
+        inline TOperationResult ComputeRangeBackwards(size_t currentNode, size_t queryLength) const {
             // We move to the end of the desired interval and go backwards.
             size_t lastNode = currentNode + queryLength;
 
@@ -369,6 +521,10 @@ namespace NProust {
 
     template<typename TValue, typename TOperationResult, typename TOperation, size_t LeafSizeLog = 0>
     std::unique_ptr<IPointUpdateEngine<TValue, TOperationResult, TOperation>> CreateRobustPointUpdateEngine() {
-        return std::make_unique<TRobustPointUpdateEngine<TValue, TOperationResult, TOperation, LeafSizeLog>>();
+        if constexpr (HasUndo<TOperation, TOperationResult>) {
+            return std::make_unique<TFatPointUpdateEngine<TValue, TOperationResult, TOperation, 4>>();
+        } else {
+            return std::make_unique<TRobustPointUpdateEngine<TValue, TOperationResult, TOperation, LeafSizeLog>>();
+        }
     }
 } // namespace NProust

@@ -58,15 +58,13 @@ namespace NProustExamples {
     template<size_t StatisticsRequired = 3>
     class TNaiveInverseOrderStatisticsEngine: public NProust::IRangeUpdateEngine<int32_t, TInverseOrderStatisticState, TInverseOrderStatisticOperation<StatisticsRequired>> {
     public:
-        virtual NProust::TVersion Init(const size_t length) override {
+        virtual void Init(const size_t length) override {
             Elements.resize(length);
             std::fill(Elements.begin(), Elements.end(), 0);
-            return 0;  // no recovery is needed, hence ignoring
         }
 
-        virtual NProust::TVersion SetRange(const size_t left, const size_t right, const int32_t& value) override {
+        virtual void SetRange(const size_t left, const size_t right, const int32_t& value) override {
             std::fill(Elements.begin() + left, Elements.begin() + right, value);
-            return 0;
         }
 
         virtual TInverseOrderStatisticState ComputeRange(const size_t left, const size_t right) const override {

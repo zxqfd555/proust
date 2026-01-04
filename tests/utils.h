@@ -11,12 +11,26 @@
 #include "engine/robust/engine.h"
 #include "engine/operations.h"
 
-template<typename TValue, typename TOperationResult, typename TOperation, NProust::NodeTopology TNodeTopology = NProust::TPreorderNodeTopology<0>>
+enum class ETestedEngineType {
+    RangeRobust,
+    PointRobust,
+    Fat
+};
+
+template<
+    typename TValue,
+    typename TOperationResult,
+    typename TOperation,
+    NProust::NodeTopology TNodeTopology = NProust::TPreorderNodeTopology<0>,
+    typename TLayout = NProust::TSoALayout<TValue, TOperationResult, std::nullopt>,
+    size_t LeafSizeLog = 0,
+    size_t BranchingLog = 1
+>
 void StressTest(
     const size_t length,
     const size_t queryCount,
     std::function<TValue(std::mt19937&)> valueGenerator,
-    const NProust::EBaseGeneratorType baseGeneratorType = NProust::EBaseGeneratorType::Range,
+    const ETestedEngineType testedEngine = ETestedEngineType::RangeRobust,
     std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation>> groundTruthEngine = nullptr
 ) {
     std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
@@ -26,17 +40,28 @@ void StressTest(
     std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation>> rangeUpdateEngine;
     std::unique_ptr<NProust::IPointUpdateEngine<TValue, TOperationResult, TOperation>> pointUpdateEngine;
 
-    switch (baseGeneratorType) {
-        case (NProust::EBaseGeneratorType::Point): {
-            baseGenerator = std::make_unique<NProust::TPointUpdatePlanGenerator>(length);
-            pointUpdateEngine = NProust::CreateRobustPointUpdateEngine<TValue, TOperationResult, TOperation>();
-            pointUpdateEngine->Init(length);
-            break;
-        }
-        case (NProust::EBaseGeneratorType::Range): {
+    switch (testedEngine) {
+        case (ETestedEngineType::RangeRobust): {
             baseGenerator = std::make_unique<NProust::TRangeUpdatePlanGenerator>(length);
             rangeUpdateEngine = NProust::CreateRobustRangeUpdateEngine<TValue, TOperationResult, TOperation, TNodeTopology>();
             rangeUpdateEngine->Init(length);
+            break;
+        }
+        case (ETestedEngineType::PointRobust): {
+            baseGenerator = std::make_unique<NProust::TPointUpdatePlanGenerator>(length);
+            pointUpdateEngine = std::make_unique<NProust::TRobustPointUpdateEngine<TValue, TOperationResult, TOperation, LeafSizeLog>>();
+            pointUpdateEngine->Init(length);
+            break;
+        }
+        case (ETestedEngineType::Fat): {
+            baseGenerator = std::make_unique<NProust::TPointUpdatePlanGenerator>(length);
+            if constexpr (NProust::HasUndo<TOperation, TOperationResult>) {
+                pointUpdateEngine = std::make_unique<NProust::TFatPointUpdateEngine<TValue, TOperationResult, TOperation, BranchingLog>>();
+            } else {
+                spdlog::critical("The specified operation doesn't support Undo");
+                std::terminate();
+            }
+            pointUpdateEngine->Init(length);
             break;
         }
     };
@@ -59,14 +84,15 @@ void StressTest(
         assert(planItem.Right <= length && "Incorrect test plan: the Right endpoint is out of bounds");
         switch (planItem.Operation) {
             case NProust::EEngineOperation::SetRange: {
-                EXPECT_TRUE(planItem.Value.has_value());
-                switch (baseGeneratorType) {
-                    case (NProust::EBaseGeneratorType::Point): {
-                        EXPECT_EQ(planItem.Left + 1, planItem.Right);
+                assert(planItem.Value.has_value() && "SetRange queries must have the value");
+                switch (testedEngine) {
+                    case (ETestedEngineType::PointRobust): 
+                    case (ETestedEngineType::Fat): {
+                        assert(planItem.Left + 1 == planItem.Right && "Incorrect modification for a point-update engine");
                         pointUpdateEngine->SetPoint(planItem.Left, *planItem.Value);
                         break;
                     }
-                    case (NProust::EBaseGeneratorType::Range): {
+                    case (ETestedEngineType::RangeRobust): {
                         rangeUpdateEngine->SetRange(planItem.Left, planItem.Right, *planItem.Value);
                         break;
                     }
@@ -75,12 +101,13 @@ void StressTest(
             }
             case NProust::EEngineOperation::Query: {
                 TOperationResult result;
-                switch (baseGeneratorType) {
-                    case (NProust::EBaseGeneratorType::Point): {
+                switch (testedEngine) {
+                    case (ETestedEngineType::PointRobust): 
+                    case (ETestedEngineType::Fat): {
                         result = pointUpdateEngine->ComputeRange(planItem.Left, planItem.Right);
                         break;
                     }
-                    case (NProust::EBaseGeneratorType::Range): {
+                    case (ETestedEngineType::RangeRobust): {
                         result = rangeUpdateEngine->ComputeRange(planItem.Left, planItem.Right);
                         break;
                     }
