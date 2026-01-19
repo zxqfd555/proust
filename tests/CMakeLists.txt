@@ -17,9 +17,9 @@ endif()
 add_executable(tests
     test_dataset_serialization.cpp
     test_fat_engine.cpp
-    test_in_memory_simple.cpp
     test_point_update_engine.cpp
     test_range_update_engine.cpp
+    test_simple.cpp
 )
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")

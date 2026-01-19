@@ -15,12 +15,14 @@ namespace NProust {
 
         virtual void Init(const size_t length) override {
             Elements = std::vector<TOperationResult>(length, TOperationResult());
+            const auto baseElement = TOperation::template FromRepeated<TValue, TOperationResult>(TValue(), 1);
+            std::fill(Elements.begin(), Elements.end(), baseElement);
         }
 
         virtual void SetRange(const size_t rangeStart, const size_t rangeEnd, const TValue& value) override {
             assert(rangeStart <= rangeEnd && "The range start must be smaller than its end");
             assert(rangeEnd <= Elements.size() && "The range goes beyond the allocated capacity");
-            const auto element = TOperation::template Repeat<TValue, TOperationResult>(value, 1);
+            const auto element = TOperation::template FromRepeated<TValue, TOperationResult>(value, 1);
             std::fill(Elements.begin() + rangeStart, Elements.begin() + rangeEnd, element);
         }
 

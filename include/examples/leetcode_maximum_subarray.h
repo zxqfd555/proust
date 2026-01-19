@@ -7,6 +7,8 @@
 #include "engine/operations.h"
 
 namespace NProustExamples {
+    class TNaiveMaxSumEngine;
+
     struct TMaxSumState {
         int32_t MaxSubarraySum;
         int32_t MaxPrefixSum;
@@ -16,7 +18,7 @@ namespace NProustExamples {
 
     struct TMaxSumStateOperation {
         template<typename TValue, typename TOperationResult>
-        static TOperationResult Repeat(const TValue& v, size_t times) noexcept {
+        static TOperationResult FromRepeated(const TValue& v, size_t times) noexcept {
             if constexpr (std::is_same_v<TValue, int32_t> && std::is_same_v<TOperationResult, TMaxSumState>) {
                 int32_t fullSum = v * times;
                 if (v > 0) {
@@ -25,7 +27,7 @@ namespace NProustExamples {
                     return {v, v, v, fullSum};
                 }
             } else {
-                static_assert(sizeof(TValue) == 0, "Unsupported type for TMaxSumStateOperation::Repeat");
+                static_assert(sizeof(TValue) == 0, "Unsupported type for TMaxSumStateOperation::FromRepeated");
             }
         }
 
@@ -44,6 +46,11 @@ namespace NProustExamples {
             } else {
                 static_assert(sizeof(TOperationResult) == 0, "Unsupported type for TMaxSumStateOperation::Merge");
             }
+        }
+
+        template<typename TValue, typename TOperationResult>
+        static TOperationResult FromMany(const TValue* data, const size_t rangeStart, const size_t rangeEnd) noexcept {
+            return TNaiveMaxSumEngine::ComputeRangeNaively(data, rangeStart, rangeEnd);
         }
     };
 
@@ -76,22 +83,26 @@ namespace NProustExamples {
         }
 
         virtual TMaxSumState ComputeRange(const size_t left, const size_t right) const override {
+            return TNaiveMaxSumEngine::ComputeStateNaively(Elements.data(), left, right);
+        }
+
+        static TMaxSumState ComputeStateNaively(const int32_t* elements, const size_t left, const size_t right) {
             // In fact, a query response is just a maximum subsegment sum,
             // but we'll calculate other parts of TMaxSumState too, just to be sure
             // it's computed correctly and no hidden bugs with a correct answer but
             // incorrect state take place.
             int32_t fullSum = 0;
-            int32_t maxSumLeft = Elements[left];
-            int32_t maxSubarraySum = Elements[left];
+            int32_t maxSumLeft = elements[left];
+            int32_t maxSubarraySum = elements[left];
 
             {
                 int32_t currentSum = 0;
                 for (size_t index = left; index < right; ++index) {
-                    currentSum += Elements[index];
+                    currentSum += elements[index];
                     maxSubarraySum = std::max(maxSubarraySum, currentSum);
                     currentSum = std::max(currentSum, 0);
 
-                    fullSum += Elements[index];
+                    fullSum += elements[index];
                     maxSumLeft = std::max(maxSumLeft, fullSum);
                 }
             }
@@ -101,13 +112,14 @@ namespace NProustExamples {
             {
                 int32_t currentSum = fullSum;
                 for (size_t index = left; index + 1 < right; ++index) {
-                    currentSum -= Elements[index];
+                    currentSum -= elements[index];
                     maxSumRight = std::max(maxSumRight, currentSum);
                 }
             }
 
             return {maxSubarraySum, maxSumLeft, maxSumRight, fullSum};
         }
+
 
     private:
         std::vector<int32_t> Elements;

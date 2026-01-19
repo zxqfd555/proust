@@ -11,6 +11,124 @@
 #include "engine/robust/engine.h"
 #include "engine/operations.h"
 
+namespace {
+    const bool LOG_LEVEL_ADJUSTED = [] {
+        spdlog::set_level(spdlog::level::warn);
+        return true;
+    }();
+}
+
+// This wrapper is used to test the cases where the default element is not a neutral one.
+// A neutral element isn't required for any of the engines, we need to test that it isn't
+// assumed in the point engines with undo.
+struct TAsymmetricIntWrapper {
+    TAsymmetricIntWrapper()
+        : Wrapped(1)
+    {
+    }
+
+    explicit TAsymmetricIntWrapper(const int32_t wrapped)
+        : Wrapped(wrapped)
+    {
+    }
+
+    int32_t Wrapped = 1;
+};
+
+inline std::function<TAsymmetricIntWrapper(std::mt19937&)> CreateAsymmetricIntGenerator(const int32_t lower, const int32_t upper) {
+    return [lower, upper](std::mt19937& generator) {
+        static std::uniform_int_distribution<int32_t> valueDistribution(lower, upper);
+        auto value = valueDistribution(generator);
+        return TAsymmetricIntWrapper(value);
+    };
+}
+
+struct TAsymmetricIntWrapperOperation {
+    template<typename TValue, typename TOperationResult>
+    inline static TOperationResult FromRepeated(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v.Wrapped * times))) {
+        return TOperationResult(v.Wrapped * times);
+    }
+
+    template<typename TOperationResult>
+    inline static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) noexcept(noexcept(lhs + rhs)) {
+        return lhs + rhs;
+    }
+};
+
+struct TAsymmetricIntWrapperOperationWithUndo {
+    template<typename TValue, typename TOperationResult>
+    inline static TOperationResult FromRepeated(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v.Wrapped * times))) {
+        return TOperationResult(v.Wrapped * times);
+    }
+
+    template<typename TOperationResult>
+    inline static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) noexcept(noexcept(lhs + rhs)) {
+        return lhs + rhs;
+    }
+
+    template<typename TOperationResult>
+    inline static TOperationResult Undo(const TOperationResult& lhs, const TOperationResult& rhs) noexcept(noexcept(lhs - rhs)) {
+        return lhs - rhs;
+    }
+};
+
+struct TAsymmetricIntWrapperOperationWithFromMany {
+    template<typename TValue, typename TOperationResult>
+    inline static TOperationResult FromRepeated(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v.Wrapped * times))) {
+        return TOperationResult(v.Wrapped * times);
+    }
+
+    template<typename TOperationResult>
+    inline static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) noexcept(noexcept(lhs + rhs)) {
+        return lhs + rhs;
+    }
+
+    template<typename TValue, typename TOperationResult>
+    inline static TOperationResult FromMany(const TValue* elements, const size_t left, const size_t right) noexcept {
+        TOperationResult result = elements[left].Wrapped;
+        for (size_t index = left + 1; index < right; ++index) {
+            result += elements[index].Wrapped;
+        }
+        return result;
+    }
+};
+
+struct TAsymmetricIntWrapperOperationWithUndoAndFromMany {
+    template<typename TValue, typename TOperationResult>
+    inline static TOperationResult FromRepeated(const TValue& v, const size_t times) noexcept {
+        return TOperationResult(v.Wrapped * times);
+    }
+
+    template<typename TOperationResult>
+    inline static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) noexcept {
+        return lhs + rhs;
+    }
+
+    template<typename TOperationResult>
+    inline static TOperationResult Undo(const TOperationResult& lhs, const TOperationResult& rhs) noexcept {
+        return lhs - rhs;
+    }
+
+    template<typename TValue, typename TOperationResult>
+    inline static TOperationResult FromMany(const TValue* elements, const size_t left, const size_t right) noexcept {
+        TOperationResult result = elements[left].Wrapped;
+        for (size_t index = left + 1; index < right; ++index) {
+            result += elements[index].Wrapped;
+        }
+        return result;
+    }
+};
+
+constexpr size_t N_QUERIES_IN_STRESS_TEST = 10000;
+
+template<typename TValue, typename TOperationResult, typename TOperation>
+using TNaiveEngineFactory = std::function<std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation>>()>;
+
+template<typename TValue, typename TOperationResult, typename TOperation>
+std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation>> DefaultNaiveEngineFactory() {
+    return nullptr;
+}
+
 enum class ETestedEngineType {
     RangeRobust,
     PointRobust,

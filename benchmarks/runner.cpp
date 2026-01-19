@@ -380,7 +380,7 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
         }
     }
 
-    const auto durationPerQuery = runTimeElapsed.count() / readCount;
+    const auto durationPerQuery = runTimeElapsed.count() / (readCount - warmupUntilEventId);
     const auto runTimeElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(runTimeElapsed).count();
     spdlog::info("The run has finished successfully. {} queries processed in {} ms ({} ns on average per query)", readCount, runTimeElapsedMs, durationPerQuery);
 

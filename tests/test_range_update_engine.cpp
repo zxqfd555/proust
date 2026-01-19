@@ -15,23 +15,6 @@
 
 using NProust::CreateRandomIntGenerator;
 
-constexpr size_t N_QUERIES_IN_STRESS_TEST = 10000;
-
-namespace {
-    const bool spdlog_disabled = [] {
-        spdlog::set_level(spdlog::level::warn);
-        return true;
-    }();
-}
-
-template<typename TValue, typename TOperationResult, typename TOperation>
-using TNaiveEngineFactory = std::function<std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation>>()>;
-
-template<typename TValue, typename TOperationResult, typename TOperation>
-std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation>> DefaultNaiveEngineFactory() {
-    return nullptr;
-}
-
 template<typename TValue, typename TOperationResult, typename TOperation, typename TNodeTopology>
 void InvokeTestForDifferentLayouts(
     const size_t length,
@@ -47,15 +30,8 @@ void InvokeTestForDifferentLayouts(
         ETestedEngineType::RangeRobust,
         naiveEngineFactory()
     );
-    StressTest<TValue, TOperationResult, TOperation, TNodeTopology, NProust::TSoALayout<TValue, TOperationResult, std::numeric_limits<TValue>::max()>>(
-        length,
-        queryCount,
-        valueGenerator,
-        ETestedEngineType::RangeRobust,
-        naiveEngineFactory()
-    );
 
-    // Test both variants for AoS: with and without sentinel
+    // Test basic variant for AoS, without sentinel
     StressTest<TValue, TOperationResult, TOperation, TNodeTopology, NProust::TAoSLayout<TValue, TOperationResult, std::nullopt>>(
         length,
         queryCount,
@@ -63,13 +39,24 @@ void InvokeTestForDifferentLayouts(
         ETestedEngineType::RangeRobust,
         naiveEngineFactory()
     );
-    StressTest<TValue, TOperationResult, TOperation, TNodeTopology, NProust::TAoSLayout<TValue, TOperationResult, std::numeric_limits<TValue>::max()>>(
-        length,
-        queryCount,
-        valueGenerator,
-        ETestedEngineType::RangeRobust,
-        naiveEngineFactory()
-    );
+
+    if constexpr (std::is_same_v<TValue, int32_t> || std::is_same_v<TValue, int64_t>) {
+        StressTest<TValue, TOperationResult, TOperation, TNodeTopology, NProust::TSoALayout<TValue, TOperationResult, std::numeric_limits<TValue>::max()>>(
+            length,
+            queryCount,
+            valueGenerator,
+            ETestedEngineType::RangeRobust,
+            naiveEngineFactory()
+        );
+
+        StressTest<TValue, TOperationResult, TOperation, TNodeTopology, NProust::TAoSLayout<TValue, TOperationResult, std::numeric_limits<TValue>::max()>>(
+            length,
+            queryCount,
+            valueGenerator,
+            ETestedEngineType::RangeRobust,
+            naiveEngineFactory()
+        );
+    }
 }
 
 template<typename TValue, typename TOperationResult, typename TOperation>
@@ -191,4 +178,20 @@ TEST(RangeUpdateEngine, LeetcodeThirdDistinctMaximumExample) {
         CreateRandomIntGenerator(-1000000000, 1000000000),
         []() { return NProustExamples::CreateNaiveInverseOrderStatisticsEngine<3>(); }
     );
+}
+
+TEST(RangeUpdateEngine, AsymmetricIntSum) {
+    TestRangeUpdateEngineExhaustively<TAsymmetricIntWrapper, int64_t, TAsymmetricIntWrapperOperation>(CreateAsymmetricIntGenerator(-1000, 1000));
+}
+
+TEST(RangeUpdateEngine, AsymmetricIntSumWithUndo) {
+    TestRangeUpdateEngineExhaustively<TAsymmetricIntWrapper, int64_t, TAsymmetricIntWrapperOperationWithUndo>(CreateAsymmetricIntGenerator(-1000, 1000));
+}
+
+TEST(RangeUpdateEngine, AsymmetricIntSumWithFromMany) {
+    TestRangeUpdateEngineExhaustively<TAsymmetricIntWrapper, int64_t, TAsymmetricIntWrapperOperationWithFromMany>(CreateAsymmetricIntGenerator(-1000, 1000));
+}
+
+TEST(RangeUpdateEngine, AsymmetricIntSumWithUndoAndFromMany) {
+    TestRangeUpdateEngineExhaustively<TAsymmetricIntWrapper, int64_t, TAsymmetricIntWrapperOperationWithUndoAndFromMany>(CreateAsymmetricIntGenerator(-1000, 1000));
 }

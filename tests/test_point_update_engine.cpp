@@ -15,23 +15,6 @@
 
 using NProust::CreateRandomIntGenerator;
 
-constexpr size_t N_QUERIES_IN_STRESS_TEST = 10000;
-
-namespace {
-    const bool spdlog_disabled = [] {
-        spdlog::set_level(spdlog::level::warn);
-        return true;
-    }();
-}
-
-template<typename TValue, typename TOperationResult, typename TOperation>
-using TNaiveEngineFactory = std::function<std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation>>()>;
-
-template<typename TValue, typename TOperationResult, typename TOperation>
-std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation>> DefaultNaiveEngineFactory() {
-    return nullptr;
-}
-
 template<typename TValue, typename TOperationResult, typename TOperation>
 void TestPointUpdateEngineExhaustively(
     std::function<TValue(std::mt19937&)> valueGenerator,
@@ -130,3 +113,20 @@ TEST(PointUpdateEngine, LeetcodeThirdDistinctMaximumExample) {
         []() { return NProustExamples::CreateNaiveInverseOrderStatisticsEngine<3>(); }
     );
 }
+
+TEST(PointUpdateEngine, AsymmetricIntSum) {
+    TestPointUpdateEngineExhaustively<TAsymmetricIntWrapper, int64_t, TAsymmetricIntWrapperOperation>(CreateAsymmetricIntGenerator(-1000, 1000));
+}
+
+TEST(PointUpdateEngine, AsymmetricIntSumWithUndo) {
+    TestPointUpdateEngineExhaustively<TAsymmetricIntWrapper, int64_t, TAsymmetricIntWrapperOperationWithUndo>(CreateAsymmetricIntGenerator(-1000, 1000));
+}
+
+TEST(PointUpdateEngine, AsymmetricIntSumWithFromMany) {
+    TestPointUpdateEngineExhaustively<TAsymmetricIntWrapper, int64_t, TAsymmetricIntWrapperOperationWithFromMany>(CreateAsymmetricIntGenerator(-1000, 1000));
+}
+
+TEST(PointUpdateEngine, AsymmetricIntSumWithUndoAndFromMany) {
+    TestPointUpdateEngineExhaustively<TAsymmetricIntWrapper, int64_t, TAsymmetricIntWrapperOperationWithUndoAndFromMany>(CreateAsymmetricIntGenerator(-1000, 1000));
+}
+

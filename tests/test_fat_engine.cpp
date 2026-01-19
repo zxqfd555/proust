@@ -15,23 +15,6 @@
 
 using NProust::CreateRandomIntGenerator;
 
-constexpr size_t N_QUERIES_IN_STRESS_TEST = 10000;
-
-namespace {
-    const bool spdlog_disabled = [] {
-        spdlog::set_level(spdlog::level::warn);
-        return true;
-    }();
-}
-
-template<typename TValue, typename TOperationResult, typename TOperation>
-using TNaiveEngineFactory = std::function<std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation>>()>;
-
-template<typename TValue, typename TOperationResult, typename TOperation>
-std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation>> DefaultNaiveEngineFactory() {
-    return nullptr;
-}
-
 template<typename TValue, typename TOperationResult, typename TOperation>
 void TestFatEngineExhaustively(std::function<TValue(std::mt19937&)> valueGenerator) {
     // The topology and layout aren't used in the stress test for point-update engine,
@@ -92,4 +75,12 @@ TEST(FatEngine, IntSum) {
 
 TEST(FatEngine, BinaryXor) {
     TestFatEngineExhaustively<int64_t, int64_t, NProust::TBitwiseXorOperation>(CreateRandomIntGenerator(0, 65536));
+}
+
+TEST(FatEngine, AsymmetricIntSumWithUndo) {
+    TestFatEngineExhaustively<TAsymmetricIntWrapper, int64_t, TAsymmetricIntWrapperOperationWithUndo>(CreateAsymmetricIntGenerator(-1000, 1000));
+}
+
+TEST(FatEngine, AsymmetricIntSumWithFromMany) {
+    TestFatEngineExhaustively<TAsymmetricIntWrapper, int64_t, TAsymmetricIntWrapperOperationWithUndoAndFromMany>(CreateAsymmetricIntGenerator(-1000, 1000));
 }

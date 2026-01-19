@@ -31,7 +31,7 @@ namespace NProust {
     class TLazyTag<TValue, void> {
     private:
         TValue Value;
-	[[no_unique_address]] bool IsDefined = false;
+	    [[no_unique_address]] bool IsDefined = false;
 
     public:
         TLazyTag() = default;

@@ -7,13 +7,13 @@
 namespace NProust {
     template<typename TOperation, typename TValue, typename TOperationResult>
     concept ValidOperation = requires(const TValue& value, const TOperationResult& lhs, const TOperationResult& rhs, const size_t times) {
-        { TOperation::template Repeat<TValue, TOperationResult>(value, times) } -> std::same_as<TOperationResult>;
+        { TOperation::template FromRepeated<TValue, TOperationResult>(value, times) } -> std::same_as<TOperationResult>;
         { TOperation::template Merge<TOperationResult>(lhs, rhs) } -> std::same_as<TOperationResult>;
     };
 
-    template<typename TOperation, typename TOperationResult>
-    concept HasMergeMany = requires(const TOperationResult* data, size_t fromIndex, size_t toIndex) {
-        { TOperation::template MergeMany<TOperationResult>(data, fromIndex, toIndex) } -> std::same_as<TOperationResult>;
+    template<typename TOperation, typename TValue, typename TOperationResult>
+    concept HasFromMany = requires(const TValue* data, size_t fromIndex, size_t toIndex) {
+        { TOperation::template FromMany<TOperationResult>(data, fromIndex, toIndex) } -> std::same_as<TOperationResult>;
     };
 
     template<typename TOperation, typename TOperationResult>

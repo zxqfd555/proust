@@ -29,8 +29,7 @@ namespace NProust {
             if (TNodeTopology::IsLeaf(2)) {
                 // If the leaf size is one, there is no need for an extra allocation.
                 LazySnapshot.resize(length);
-                TOperationResult defaultSnapshotValue = TOperation::template Repeat<TValue, TOperationResult>(TValue(), 1);
-                std::fill(LazySnapshot.begin(), LazySnapshot.end(), defaultSnapshotValue);
+                std::fill(LazySnapshot.begin(), LazySnapshot.end(), TValue());
             }
             AllocatedLength = length;
             InitNodes(ROOT_NODE_ID, 0, length);
@@ -54,11 +53,11 @@ namespace NProust {
 
     private:
         TLayout Nodes;
-        std::vector<TOperationResult> LazySnapshot;
+        std::vector<TValue> LazySnapshot;
         size_t AllocatedLength = 0;
 
         void InitNodes(const size_t currentNodeId, const size_t nodeStart, const size_t nodeEnd) {
-            Nodes.SetSubtreeValue(currentNodeId, TOperation::template Repeat<TValue, TOperationResult>(TValue(), nodeEnd - nodeStart));
+            Nodes.SetSubtreeValue(currentNodeId, TOperation::template FromRepeated<TValue, TOperationResult>(TValue(), nodeEnd - nodeStart));
             Nodes.DropLazilyPropagated(currentNodeId);
 
             if (!TNodeTopology::IsLeaf(nodeEnd - nodeStart)) {
@@ -72,48 +71,46 @@ namespace NProust {
         inline void ModifyNodes(const size_t nodeId, const size_t rangeStart, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd, const TValue& value) {
             if (rangeStart <= nodeStart && rangeEnd >= nodeEnd) {
                 Nodes.SetLazilyPropagated(nodeId, value);
-                Nodes.SetSubtreeValue(nodeId, TOperation::template Repeat<TValue, TOperationResult>(value, nodeEnd - nodeStart));
+                Nodes.SetSubtreeValue(nodeId, TOperation::template FromRepeated<TValue, TOperationResult>(value, nodeEnd - nodeStart));
                 return;
             }
 
             if (TNodeTopology::IsLeaf(nodeEnd - nodeStart)) [[unlikely]] {
-                const TOperationResult modifyValue = TOperation::template Repeat<TValue, TOperationResult>(value, 1);
                 const size_t segmentStart = std::max(rangeStart, nodeStart);
                 const size_t segmentEnd = std::min(rangeEnd, nodeEnd);
                 if (Nodes.HasLazilyPropagated(nodeId)) {
                     const auto lazilyPropagated = Nodes.GetLazilyPropagated(nodeId);
-                    const TOperationResult offcutValue = TOperation::template Repeat<TValue, TOperationResult>(lazilyPropagated, 1);
-                    std::fill(LazySnapshot.begin() + nodeStart, LazySnapshot.begin() + segmentStart, offcutValue);
-                    std::fill(LazySnapshot.begin() + segmentStart, LazySnapshot.begin() + segmentEnd, modifyValue);
-                    std::fill(LazySnapshot.begin() + segmentEnd, LazySnapshot.begin() + nodeEnd, offcutValue);
+                    std::fill(LazySnapshot.begin() + nodeStart, LazySnapshot.begin() + segmentStart, lazilyPropagated);
+                    std::fill(LazySnapshot.begin() + segmentStart, LazySnapshot.begin() + segmentEnd, value);
+                    std::fill(LazySnapshot.begin() + segmentEnd, LazySnapshot.begin() + nodeEnd, lazilyPropagated);
                     Nodes.DropLazilyPropagated(nodeId);
 
-                    const auto segmentValue = TOperation::template Repeat<TValue, TOperationResult>(value, segmentEnd - segmentStart);
+                    const auto segmentValue = TOperation::template FromRepeated<TValue, TOperationResult>(value, segmentEnd - segmentStart);
 
                     const auto toSegmentEnd = 
                         segmentStart == nodeStart ? segmentValue :
-                        TOperation::Merge(TOperation::template Repeat<TValue, TOperationResult>(lazilyPropagated, segmentStart - nodeStart), segmentValue);
+                        TOperation::Merge(TOperation::template FromRepeated<TValue, TOperationResult>(lazilyPropagated, segmentStart - nodeStart), segmentValue);
 
                     auto nodeValue =
                         segmentEnd == nodeEnd ? toSegmentEnd :
-                        TOperation::Merge(toSegmentEnd, TOperation::template Repeat<TValue, TOperationResult>(lazilyPropagated, nodeEnd - segmentEnd));
+                        TOperation::Merge(toSegmentEnd, TOperation::template FromRepeated<TValue, TOperationResult>(lazilyPropagated, nodeEnd - segmentEnd));
 
                     Nodes.SetSubtreeValue(nodeId, std::move(nodeValue));
                 } else {
-                    std::fill(LazySnapshot.begin() + segmentStart, LazySnapshot.begin() + segmentEnd, modifyValue);
+                    std::fill(LazySnapshot.begin() + segmentStart, LazySnapshot.begin() + segmentEnd, value);
 
-                    TOperationResult subtreeValue = LazySnapshot[nodeStart];
-                    if (segmentStart > nodeStart) {  // TODO: MergeMany usage
+                    TOperationResult subtreeValue = TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[nodeStart], 1);
+                    if (segmentStart > nodeStart) {  // TODO: FromMany usage
                         for (size_t index = nodeStart + 1; index < segmentStart; ++index) {
-                            subtreeValue = TOperation::Merge(subtreeValue, LazySnapshot[index]);
+                            subtreeValue = TOperation::Merge(subtreeValue, TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[index], 1));
                         }
-                        subtreeValue = TOperation::Merge(subtreeValue, TOperation::template Repeat<TValue, TOperationResult>(value, segmentEnd - segmentStart));
+                        subtreeValue = TOperation::Merge(subtreeValue, TOperation::template FromRepeated<TValue, TOperationResult>(value, segmentEnd - segmentStart));
                     } else {
-                        subtreeValue = TOperation::template Repeat<TValue, TOperationResult>(value, segmentEnd - segmentStart);
+                        subtreeValue = TOperation::template FromRepeated<TValue, TOperationResult>(value, segmentEnd - segmentStart);
                     }
 
                     for (size_t index = segmentEnd; index < nodeEnd; ++index) {
-                        subtreeValue = TOperation::Merge(subtreeValue, LazySnapshot[index]);
+                        subtreeValue = TOperation::Merge(subtreeValue, TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[index], 1));
                     }
 
                     Nodes.SetSubtreeValue(nodeId, std::move(subtreeValue));
@@ -135,13 +132,13 @@ namespace NProust {
                 if (midpoint > rangeStart) {
                     ModifyNodes(leftChildId, rangeStart, rangeEnd, nodeStart, midpoint, value);
                 } else if (hasLazilyPropagated) {
-                    Nodes.SetSubtreeValue(leftChildId, TOperation::template Repeat<TValue, TOperationResult>(toPropagate, midpoint - nodeStart));
+                    Nodes.SetSubtreeValue(leftChildId, TOperation::template FromRepeated<TValue, TOperationResult>(toPropagate, midpoint - nodeStart));
                 }
 
                 if (midpoint < rangeEnd) {
                     ModifyNodes(rightChildId, rangeStart, rangeEnd, midpoint, nodeEnd, value);
                 } else if (hasLazilyPropagated) {
-                    Nodes.SetSubtreeValue(rightChildId, TOperation::template Repeat<TValue, TOperationResult>(toPropagate, nodeEnd - midpoint));
+                    Nodes.SetSubtreeValue(rightChildId, TOperation::template FromRepeated<TValue, TOperationResult>(toPropagate, nodeEnd - midpoint));
                 }
 
                 Nodes.SetSubtreeValue(nodeId, TOperation::Merge(Nodes.GetSubtreeValue(leftChildId), Nodes.GetSubtreeValue(rightChildId)));
@@ -157,15 +154,15 @@ namespace NProust {
                 const auto lazilyPropagated = Nodes.GetLazilyPropagated(nodeId);
                 const size_t segmentStart = std::max(rangeStart, nodeStart);
                 const size_t segmentEnd = std::min(rangeEnd, nodeEnd);
-                return TOperation::template Repeat<TValue, TOperationResult>(lazilyPropagated, segmentEnd - segmentStart);
+                return TOperation::template FromRepeated<TValue, TOperationResult>(lazilyPropagated, segmentEnd - segmentStart);
             }
 
             if (TNodeTopology::IsLeaf(nodeEnd - nodeStart)) {
                 const size_t segmentStart = std::max(rangeStart, nodeStart);
                 const size_t segmentEnd = std::min(rangeEnd, nodeEnd);
-                auto result = LazySnapshot[segmentStart];
-                for (size_t index = segmentStart + 1; index < segmentEnd; ++index) {  // TODO: MergeMany
-                    result = TOperation::Merge(result, LazySnapshot[index]);
+                TOperationResult result = TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[segmentStart], 1);
+                for (size_t index = segmentStart + 1; index < segmentEnd; ++index) {  // TODO: FromMany
+                    result = TOperation::Merge(result, TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[index], 1));
                 }
                 return result;
             } else {
@@ -233,24 +230,41 @@ namespace NProust {
             assert((1 << LeafSizeLog) == LeafSize);
             {
                 PointValues.resize(AllocatedLength);
-                const auto defaultValue = TOperation::template Repeat<TValue, TOperationResult>(TValue(), 1);
-                std::fill(PointValues.begin(), PointValues.end(), defaultValue);
+                std::fill(PointValues.begin(), PointValues.end(), TValue());
             }
 
             NodeValues.resize(totalNodes + 1);  // +1 for 1-indexing
             BottomLayerStart = NodeValues.size() - (AllocatedLength >> LeafSizeLog);
 
-            for (size_t nodeIndex = totalNodes; nodeIndex > 0; --nodeIndex) {
-                if ((nodeIndex << BranchingLog) > totalNodes) {
-                    NodeValues[nodeIndex] = TOperation::template Repeat<TValue, TOperationResult>(TValue(), LeafSize);
-                    continue;
+            size_t currentLayerStart = BottomLayerStart;
+            size_t layerNodes = (AllocatedLength >> LeafSizeLog);
+            size_t nodeCoverage = LeafSize;
+            const auto neutral = TOperation::Undo(
+                TOperation::template FromRepeated<TValue, TOperationResult>(TValue(), 1),
+                TOperation::template FromRepeated<TValue, TOperationResult>(TValue(), 1)
+            );
+            while (layerNodes > 1) {
+                for (size_t nodeIndex = currentLayerStart; nodeIndex < currentLayerStart + layerNodes; ++nodeIndex) {
+                    const bool isLeftmost = (nodeIndex & (CHILDREN_COUNT - 1)) == LEFTMOST_CHILD_INDEX;
+                    if (isLeftmost) {
+                        NodeValues[nodeIndex] = neutral;
+                    } else {
+                        const auto defaultChunk = TOperation::template FromRepeated<TValue, TOperationResult>(TValue(), nodeCoverage);
+                        NodeValues[nodeIndex] = TOperation::Merge(NodeValues[nodeIndex - 1], defaultChunk);
+                    }
                 }
+                layerNodes >>= BranchingLog;
+                nodeCoverage <<= BranchingLog;
+                currentLayerStart -= layerNodes;
             }
         }
 
         virtual void SetPoint(const size_t position, const TValue& value) override {
-            const auto delta = TOperation::Undo(value, PointValues[position]);
-            PointValues[position] = TOperation::template Repeat<TValue, TOperationResult>(value, 1);
+            const auto delta = TOperation::Undo(
+                TOperation::template FromRepeated<TValue, TOperationResult>(value, 1),
+                TOperation::template FromRepeated<TValue, TOperationResult>(PointValues[position], 1)
+            );
+            PointValues[position] = value;
 
             auto currentNode = BottomLayerStart + (position >> LeafSizeLog);
             while (currentNode >= ROOT_NODE_ID) {
@@ -276,19 +290,19 @@ namespace NProust {
 
     private:
         std::vector<TOperationResult> NodeValues;
-        std::vector<TOperationResult> PointValues;
+        std::vector<TValue> PointValues;
         size_t AllocatedLength = 0;
         size_t LeafSize = 0;
         size_t LeafSizeLog = 0;
         size_t BottomLayerStart = 0;
 
         inline TOperationResult ComputeRangeBruteForce(const size_t rangeStart, const size_t rangeEnd) const {
-            if constexpr (HasMergeMany<TOperation, TOperationResult>) {
-                return TOperation::MergeMany(PointValues.data(), rangeStart, rangeEnd);
+            if constexpr (HasFromMany<TOperation, TValue, TOperationResult>) {
+                return TOperation::FromMany(PointValues.data(), rangeStart, rangeEnd);
             } else {
-                auto result = PointValues[rangeStart];
+                auto result = TOperation::template FromRepeated<TValue, TOperationResult>(PointValues[rangeStart], 1);
                 for (size_t index = rangeStart + 1; index < rangeEnd; ++index) {
-                    result = TOperation::Merge(result, PointValues[index]);
+                    result = TOperation::Merge(result, TOperation::template FromRepeated<TValue, TOperationResult>(PointValues[index], 1));
                 }
                 return result;
             }
@@ -333,7 +347,7 @@ namespace NProust {
             NodeValues.resize(AllocatedLength << 1);
 
             // Initialize the tree with the default values starting from the leafs
-            const auto leafValue = TOperation::template Repeat<TValue, TOperationResult>(TValue(), 1);
+            const auto leafValue = TOperation::template FromRepeated<TValue, TOperationResult>(TValue(), 1);
             std::fill(NodeValues.begin(), NodeValues.end(), leafValue);
             for (size_t index = AllocatedLength - 1; index >= 1; --index) {
                 NodeValues[index] = TOperation::Merge(NodeValues[(index << 1)], NodeValues[(index << 1) + 1]);
@@ -348,14 +362,14 @@ namespace NProust {
 
             if constexpr (HasUndo<TOperation, TOperationResult>) {
                 const auto oldValue = NodeValues[nodePosition];
-                NodeValues[nodePosition] = TOperation::template Repeat<TValue, TOperationResult>(value, 1);
+                NodeValues[nodePosition] = TOperation::template FromRepeated<TValue, TOperationResult>(value, 1);
                 if constexpr (LeafSizeLog > 0) {
                     nodePosition >>= LeafSizeLog;
                     const auto oldValueUndone = TOperation::Undo(NodeValues[nodePosition], oldValue);
-                    NodeValues[nodePosition] = TOperation::Merge(oldValueUndone, TOperation::template Repeat<TValue, TOperationResult>(value, 1));
+                    NodeValues[nodePosition] = TOperation::Merge(oldValueUndone, TOperation::template FromRepeated<TValue, TOperationResult>(value, 1));
                 }
             } else {
-                NodeValues[nodePosition] = TOperation::template Repeat<TValue, TOperationResult>(value, 1);
+                NodeValues[nodePosition] = TOperation::template FromRepeated<TValue, TOperationResult>(value, 1);
                 if constexpr (LeafSizeLog > 0) {
                     NodeValues[nodePosition >>= LeafSizeLog] = ComputeRangeBruteForce(largeLeafStart, largeLeafStart + LEAF_SIZE);
                 }
@@ -410,12 +424,13 @@ namespace NProust {
 
     private:
         std::vector<TOperationResult> NodeValues;
+        std::vector<TValue> PointValues;
         size_t AllocatedLength;
 
         inline TOperationResult ComputeRangeBruteForce(const size_t rangeStart, const size_t rangeEnd) const {
             assert(rangeStart < rangeEnd);
-            if constexpr (HasMergeMany<TOperation, TOperationResult>) {
-                return TOperation::MergeMany(NodeValues.data(), AllocatedLength + rangeStart, AllocatedLength + rangeEnd);
+            if constexpr (HasFromMany<TOperation, TValue, TOperationResult>) {
+                return TOperation::FromMany(NodeValues.data(), AllocatedLength + rangeStart, AllocatedLength + rangeEnd);
             } else {
                 auto result = NodeValues[AllocatedLength + rangeStart];
                 for (size_t index = AllocatedLength + rangeStart + 1; index < AllocatedLength + rangeEnd; ++index) {

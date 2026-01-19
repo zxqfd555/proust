@@ -3,7 +3,7 @@
 #include "engine/robust/engine.h"
 #include "engine/operations.h"
 
-TEST(InMemorySimple, SingleElement) {
+TEST(Simple, SingleElement) {
     auto engine = NProust::CreateRobustRangeUpdateEngine<int64_t, int64_t, NProust::TSumOperation>();
     engine->Init(1);
     EXPECT_EQ(engine->ComputeRange(0, 1), 0);
@@ -18,7 +18,7 @@ TEST(InMemorySimple, SingleElement) {
     EXPECT_EQ(engine->ComputeRange(0, 1), 3);
 }
 
-TEST(InMemorySimple, SingleElementPointUpdate) {
+TEST(Simple, SingleElementPointUpdate) {
     auto engine = std::make_unique<NProust::TRobustPointUpdateEngine<int64_t, int64_t, NProust::TSumOperation>>();
     engine->Init(1);
     EXPECT_EQ(engine->ComputeRange(0, 1), 0);
@@ -33,7 +33,7 @@ TEST(InMemorySimple, SingleElementPointUpdate) {
     EXPECT_EQ(engine->ComputeRange(0, 1), 3);
 }
 
-TEST(InMemorySimple, SingleElementPointUpdateBitwiseAnd) {
+TEST(Simple, SingleElementPointUpdateBitwiseAnd) {
     auto engine = std::make_unique<NProust::TRobustPointUpdateEngine<int64_t, int64_t, NProust::TBitwiseAndOperation>>();
     engine->Init(1);
     EXPECT_EQ(engine->ComputeRange(0, 1), 0);
@@ -42,14 +42,14 @@ TEST(InMemorySimple, SingleElementPointUpdateBitwiseAnd) {
     EXPECT_EQ(engine->ComputeRange(0, 1), 1);
 }
 
-TEST(InMemorySimple, SingleElementPointUpdateSmallLeafs) {
+TEST(Simple, SingleElementPointUpdateSmallLeafs) {
     auto engine = std::make_unique<NProust::TRobustPointUpdateEngine<int64_t, int64_t, NProust::TSumOperation, 0>>();
     engine->Init(1);
     engine->SetPoint(0, 1);
     EXPECT_EQ(engine->ComputeRange(0, 1), 1);
 }
 
-TEST(InMemorySimple, TwoElements) {
+TEST(Simple, TwoElements) {
     auto engine = NProust::CreateRobustRangeUpdateEngine<int64_t, int64_t, NProust::TSumOperation>();
     engine->Init(2);
     EXPECT_EQ(engine->ComputeRange(0, 1), 0);
@@ -82,7 +82,7 @@ TEST(InMemorySimple, TwoElements) {
     EXPECT_EQ(engine->ComputeRange(1, 2), 5);
 }
 
-TEST(InMemorySimple, TwoElementsPointUpdate) {
+TEST(Simple, TwoElementsPointUpdate) {
     auto engine = std::make_unique<NProust::TRobustPointUpdateEngine<int64_t, int64_t, NProust::TSumOperation>>();
     engine->Init(2);
     EXPECT_EQ(engine->ComputeRange(0, 1), 0);
@@ -110,7 +110,7 @@ TEST(InMemorySimple, TwoElementsPointUpdate) {
     EXPECT_EQ(engine->ComputeRange(1, 2), 5);
 }
 
-TEST(InMemorySimple, GloballyAddedValues) {
+TEST(Simple, GloballyAddedValues) {
     auto engine = NProust::CreateRobustRangeUpdateEngine<int64_t, int64_t, NProust::TSumOperation>();
     engine->Init(10);
     engine->SetRange(0, 10, 10);
@@ -120,7 +120,7 @@ TEST(InMemorySimple, GloballyAddedValues) {
     EXPECT_EQ(engine->ComputeRange(9, 10), 10);
 }
 
-TEST(InMemorySimple, LazyPropagation) {
+TEST(Simple, LazyPropagation) {
     auto engine = NProust::CreateRobustRangeUpdateEngine<int64_t, int64_t, NProust::TSumOperation>();
     engine->Init(8);
     engine->SetRange(0, 8, 10);
@@ -128,7 +128,7 @@ TEST(InMemorySimple, LazyPropagation) {
     EXPECT_EQ(engine->ComputeRange(0, 8), 60);
 }
 
-TEST(InMemorySimple, FatTreeEngine_1) {
+TEST(Simple, FatTreeEngine_1) {
     auto engine = std::make_unique<NProust::TFatPointUpdateEngine<int64_t, int64_t, NProust::TSumOperation, 1>>();
     engine->Init(8);
     EXPECT_EQ(engine->ComputeRange(0, 8), 0);
@@ -139,7 +139,7 @@ TEST(InMemorySimple, FatTreeEngine_1) {
     EXPECT_EQ(engine->ComputeRange(0, 8), 2);
 }
 
-TEST(InMemorySimple, FatTreeEngine_2) {
+TEST(Simple, FatTreeEngine_2) {
     auto engine = std::make_unique<NProust::TFatPointUpdateEngine<int64_t, int64_t, NProust::TSumOperation, 2>>();
     engine->Init(16);
     EXPECT_EQ(engine->ComputeRange(0, 1), 0);
@@ -164,7 +164,7 @@ TEST(InMemorySimple, FatTreeEngine_2) {
     EXPECT_EQ(engine->ComputeRange(0, 12), 6);
 }
 
-TEST(InMemorySimple, FatTreeEngineSmallLength) {
+TEST(Simple, FatTreeEngineSmallLength) {
     auto engine = std::make_unique<NProust::TFatPointUpdateEngine<int64_t, int64_t, NProust::TSumOperation, 4>>();
     engine->Init(1);
     EXPECT_EQ(engine->ComputeRange(0, 1), 0);

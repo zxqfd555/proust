@@ -12,12 +12,12 @@ namespace NProustExamples {
     template<size_t StatisticsRequired = 3>
     struct TInverseOrderStatisticOperation {
         template<typename TValue, typename TOperationResult>
-        static TOperationResult Repeat(const TValue& v, size_t times) noexcept {
+        static TOperationResult FromRepeated(const TValue& v, size_t times) noexcept {
             if constexpr (std::is_same_v<TValue, int32_t> && std::is_same_v<TOperationResult, TInverseOrderStatisticState>) {
                 // Since each value is counted only once, the result contains only a single element.
                 return std::vector<int32_t>(1, v);
             } else {
-                static_assert(sizeof(TValue) == 0, "Unsupported type for TOrderStatisticOperation::Repeat");
+                static_assert(sizeof(TValue) == 0, "Unsupported type for TOrderStatisticOperation::FromRepeated");
             }
         }
 

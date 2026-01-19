@@ -16,14 +16,14 @@ namespace NProustExamples {
 
     struct THouseRobberDPStateOperation {
         template<typename TValue, typename TOperationResult>
-        static TOperationResult Repeat(const TValue& v, size_t times) noexcept {
+        static TOperationResult FromRepeated(const TValue& v, size_t times) noexcept {
             if constexpr (std::is_same_v<TValue, int32_t> && std::is_same_v<TOperationResult, THouseRobberDPState>) {
                 const int32_t fullResult = std::max((int32_t)0, v * (int32_t)((times + 1) >> 1));
                 const int32_t exceptOneResult = std::max((int32_t)0, v * (int32_t)(times >> 1));
                 const int32_t exceptCornersResult = std::max((int32_t)0, v * (int32_t)((times - 1) >> 1));
                 return {fullResult, exceptOneResult, exceptOneResult, exceptCornersResult};
             } else {
-                static_assert(sizeof(TValue) == 0, "Unsupported type for THouseRobberDPOperation::Repeat");
+                static_assert(sizeof(TValue) == 0, "Unsupported type for THouseRobberDPOperation::FromRepeated");
             }
         }
 
