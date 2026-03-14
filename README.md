@@ -6,6 +6,18 @@ In brief, the main lines are:
 - We use a segment tree as an efficient structure with `O(log N)` time per both modification and query. We suppose that the reader is familiar with this structure and will only describe the optimized and cache-efficient variants.
 - In practice, the `O(log N)` time doesn't mean much: two codes with the same asymptotic may differ up to an order of magnitude in terms of both, throughput and the tail latency. The most of the effort is concentrated on obtaining practical results and reliable benchmarking.
 
+## Table of Contents
+
+- [The Task](#the-task)
+- [Examples](#examples)
+- [Interfaces](#interfaces)
+- [Building a robust engine](#building-a-robust-engine)
+  - [Memory management](#memory-management)
+  - [Node topology](#node-topology)
+  - [SoA versus AoS](#soa-versus-aos)
+- [Benchmarking methodology](#benchmarking-methodology)
+- [Ensuring code quality](#ensuring-code-quality)
+
 ## The Task
 
 Suppose you have an array, or rather, an in-memory table, indexed from `0` to `N-1` inclusively. The table abstraction can be described as something like this:
