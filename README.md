@@ -15,8 +15,14 @@ In brief, the main lines are:
   - [Memory management](#memory-management)
   - [Node topology](#node-topology)
   - [SoA versus AoS](#soa-versus-aos)
+  - [Packing densely when possible](#packing-densely-when-possible)
+  - [Avoiding branching](#avoiding-branching)
+  - [Being smarter about smaller intervals](#being-smarter-about-smaller-intervals)
+- [Single point modifications](#single-point-modifications)
+  - [Bottlenecks. Fat engine](#bottlenecks-fat-engine)
 - [Benchmarking methodology](#benchmarking-methodology)
 - [Ensuring code quality](#ensuring-code-quality)
+- [Building and Dependencies](#building-and-dependencies)
 
 ## The Task
 
@@ -167,13 +173,60 @@ Both layouts have been implemented in the engine. You may implement your own: th
 
 #### Packing densely when possible
 
+The SoA layout keeps the lazily propagated values in their own array. The most natural way to represent such a value is the `std::optional<TValue>` mentioned above: the value itself, plus a boolean telling whether anything is actually stored. This boolean is exactly the kind of thing that ruins the packing we've just fought for. A `bool` next to, say, an `int32_t`, forces the structure to be padded to the alignment of the value: the resulting tag is eight bytes where the payload is only four. Across millions of nodes, half of the lazy-tag array is then meaningless padding, and we're back to wasting cache lines.
+
+The observation that saves us is that in practice the value domain is rarely used in full. If there is a value that can never legitimately be assigned, we can reserve it as a *sentinel* and let it stand for "no pending modification". For an `int32_t` sum, `std::numeric_limits<int32_t>::max()` is a natural candidate. The lazy tag then becomes just the bare value: it is defined whenever it differs from the sentinel, and dropping it is nothing more than writing the sentinel back. No boolean, no padding, perfectly dense.
+
+Both variants are implemented and chosen at compile time, behind a single `TLazyTag` interface. The default `TLazyTag<TValue>` keeps the explicit flag (decorated with `[[no_unique_address]]` so the compiler may at least pack it when the surrounding type allows). The specialization parametrized by a sentinel stores nothing but the value. The engine and the benchmark pick between them through the `Sentinel` template parameter, exposed on the command line as `--with-sentinel`.
+
+The trade-off is correctness, and it rests on the user: the sentinel must be genuinely impossible as a real value, otherwise a legitimate assignment would be silently interpreted as "nothing to propagate". When no safe sentinel exists, the boolean variant is always available as a fallback.
+
 ### Avoiding branching
+
+Once memory is laid out well, the next enemy is the branch predictor. When an operation costs around fifty nanoseconds, a single mispredicted branch - some fifteen to twenty cycles on a modern core, several nanoseconds - is already a noticeable share of the budget. There are two complementary ways to fight this.
+
+The first is to help the predictor rather than fight it. The hot path is annotated with `[[likely]]` and `[[unlikely]]` so that the compiler lays the common case out as the straight-line fall-through and pushes the rare case out of the way, keeping the instruction cache dense along the path we actually take. For example, an assignment over an empty range is `[[unlikely]]`, and bottoming out at a leaf during the descent is `[[unlikely]]` too: on a large structure, the overwhelming majority of operations terminate at internal nodes long before reaching the leaves.
+
+The second, and the stronger one, is to remove the data-dependent branch altogether and let it become arithmetic. The merge of two maxima is written as a ternary rather than an `if`, so the compiler emits a conditional move instead of a jump; the same holds for the `std::min`/`std::max` clamps used when reconciling a partial leaf. A conditional move has no misprediction penalty because there is nothing to predict.
+
+There is a limit, though, that is intrinsic to the structure. The recursive descent of the segment tree is inherently branchy: at every level we must decide which of the two children intersect the query range, and those decisions depend on data the predictor cannot foresee. Lazy propagation only adds to it, since whether a tag has to be pushed down is, again, a data-dependent branch. This is one of the structural costs of the range engine. As we will see in the [single point modifications](#single-point-modifications) section, dropping lazy tags lets us replace the whole descent with a short, straight-line sequence of bit operations - branchless by construction.
 
 ### Being smarter about smaller intervals
 
+A textbook segment tree recurses all the way down to ranges of a single element. This is elegant but wasteful, because the lowest levels of the tree are where almost everything lives: half of the nodes are leaves, a quarter are their parents, and so on. Reaching a size-one range means paying for the deepest, most numerous levels on every single operation.
+
+The remedy is to stop the recursion early. Instead of descending to single elements, we cut the tree off at a *fat leaf* that covers a small block of `LeafSize = 2^LeafSizeLog` consecutive elements, and we keep those raw elements in a flat array next to the tree. Whenever an operation lands inside such a block, it is finished with a tight linear loop over at most `LeafSize` elements - which is cache-friendly, branch-predictable and trivially vectorizable - rather than with another `LeafSizeLog` levels of pointer-free but still index-chasing traversal.
+
+The benefits compound. The tree becomes shallower, so there are fewer levels to descend and fewer merges per operation. There are fewer nodes overall, so less memory is touched: the topology classes reflect this directly, reserving less capacity once the leaves are fat (the pre-order layout drops from `2 * N` down to roughly `N`). The bottom of the structure is now a contiguous run of values instead of a layer of scattered nodes. And when the leaf size is one, the flat array is not even allocated - each leaf node simply holds its own result.
+
+The cost is the linear scan: resolving a partial leaf is `O(LeafSize)`, so making leaves too large slowly turns the structure back into a brute-force scan. There is therefore a sweet spot, and it depends on the operation and the hardware. It is found empirically by sweeping `--leaf-size-log` in the benchmarks, while the stress tests exhaustively cover every small leaf size to make sure the corner cases stay correct.
+
+One more hook helps here. For some operations a whole contiguous block can be summarized faster than by repeated pairwise merges - summing a run of integers is the obvious example. When the operation provides a `FromMany` method (detected through the `HasFromMany` concept), the engine hands the whole block to it; otherwise it falls back to a plain `Merge` loop. This keeps the generic path correct while letting cheap operations shortcut the leaf work.
+
 ## Single point modifications
 
+As noted earlier, the point modification is a special case of the range one, with `RangeStart = RangeEnd - 1`. The extra constraint is worth a dedicated engine, because it removes the single most expensive feature of the generic case: lazy propagation. A point assignment touches exactly one leaf and the `O(log N)` nodes on the path from that leaf to the root. There is nothing to defer and nothing to push down, so the whole machinery of lazy tags - and the data-dependent branches that come with it - simply disappears.
+
+`TRobustPointUpdateEngine` is built around this. It uses a binary-heap layout over an array of `2 * AllocatedLength` nodes, where `AllocatedLength` is the input size rounded up to a power of two with `std::bit_ceil`. The leaves occupy the second half of the array, so the element at position `i` lives at node `AllocatedLength + i`. The tree is one-indexed: although a touch less natural, it makes the topology arithmetic cheaper than zero-indexing, since the parent of a node is just `i >> 1` and its children are `i << 1` and `(i << 1) | 1`. An assignment writes the leaf and then walks straight up to the root, recomputing each parent as the merge of its two children in a single iterative, branch-free loop.
+
+Querying splits into two regimes, depending on whether the operation has an inverse.
+
+- When the operation provides an `Undo` (for the sum, `Undo(a, b) = a - b`), a range is computed as the difference of two prefixes: the answer for `[l, r)` is `Undo(prefix(r), prefix(l))`, where each prefix is accumulated by walking a single root-path. This is the cheapest of all, touching one path instead of two subtrees.
+- When there is no meaningful inverse - you cannot "subtract" a maximum, a maximum-subarray state, or a set of order statistics - the range has to be assembled from the `O(log N)` canonical tree nodes that exactly tile `[l, r)`. Here lies the payoff promised in the [avoiding branching](#avoiding-branching) section: because there are no lazy tags and the layout is a plain heap, the exact set of covering nodes can be enumerated with cheap bit tricks - isolating the lowest set bit with `x - (x & (x - 1))`, clearing it with `x & (x - 1)` - instead of a recursive descent. The traversal runs forward as far as the greedily largest node allows, then finishes the remainder backwards; the in-code comment reports a fourfold speedup over the recursive version, before SIMD and the fat-leaf optimization are even applied. The two passes are kept separate, and the operands fed to `Merge` in strict left-to-right order, precisely because the operation may be non-commutative.
+
+The fat-leaf trick from the previous section layers cleanly on top of either regime: the aligned core of the range is served by whole tree nodes, while the at-most-`LeafSize` elements hanging off each end are mopped up by a brute-force scan or by `FromMany`.
+
 ### Bottlenecks. Fat engine
+
+Even with lazy tags gone, the point engine has a structural bottleneck: depth. Every assignment and every prefix walk costs `log2(N)` steps, and these steps are *serially dependent* - each level reads a node produced from the level below, so the loads form a chain that cannot be overlapped. At a million elements that is roughly twenty dependent memory accesses, and what stalls the pipeline is the latency of that chain, not the arithmetic of the merges. The merge units sit idle waiting for the next load to return.
+
+The way out is to make the tree wider and therefore shorter. `TFatPointUpdateEngine` uses a branching factor of `2^BranchingLog` instead of two; the factory wires it up with `BranchingLog = 4`, that is sixteen children per node. A sixteen-way tree over a million elements is only about five levels deep instead of twenty, so the dependent-load chain shrinks by the same factor.
+
+Width is not free, of course. Recomputing a wide node from sixteen children is more work, and a prefix that ends in the middle of a node would, naively, require scanning its siblings. The "fat" engine pays for this in advance: each node stores a *running prefix* across its siblings, so that a prefix query reads one precomputed value per level rather than scanning a fan of children. This is exactly the idea behind a Fenwick tree, generalized to a wide, cache-conscious node. It does require the operation to be invertible, which is why the engine is constrained to operations that expose `Undo`.
+
+Concretely, an assignment computes the delta between the new and the old value (`Undo(new, old)`), writes the point, and folds that delta into the sibling prefixes along the path to the root. A range query is once again `Undo(prefix(end), prefix(start))`, with a brute-force fast path for ranges too short to be worth the machinery. A small detail in `Init` overbooks the capacity by one element, which lets the backward prefix walk avoid an extra bounds branch.
+
+This split is why the point-update factory dispatches on the operation: when an `Undo` is available it hands back the fat, Fenwick-style engine; otherwise it falls back to the plain binary tree with the branchless node-tiling traversal described above.
 
 ## Benchmarking methodology
 
