@@ -79,7 +79,7 @@ namespace NProust {
                 break;
             }
             case EDatasetType::OrderStatistic16: {
-                GenerateTestPlanIntoFile<int32_t, std::vector<int32_t>, NProustExamples::TInverseOrderStatisticOperation<16>>(
+                GenerateTestPlanIntoFile<int32_t, NProustExamples::TTopKState<16>, NProustExamples::TInverseOrderStatisticOperation<16>>(
                     length,
                     queryCount,
                     baseGenerator,

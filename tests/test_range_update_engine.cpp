@@ -174,7 +174,7 @@ TEST(RangeUpdateEngine, LeetcodeHouseRobberExample) {
 }
 
 TEST(RangeUpdateEngine, LeetcodeThirdDistinctMaximumExample) {
-    TestRangeUpdateEngineExhaustively<int32_t, NProustExamples::TInverseOrderStatisticState, NProustExamples::TInverseOrderStatisticOperation<3>>(
+    TestRangeUpdateEngineExhaustively<int32_t, NProustExamples::TTopKState<3>, NProustExamples::TInverseOrderStatisticOperation<3>>(
         CreateRandomIntGenerator(-1000000000, 1000000000),
         []() { return NProustExamples::CreateNaiveInverseOrderStatisticsEngine<3>(); }
     );

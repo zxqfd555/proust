@@ -1,10 +1,13 @@
 #include <chrono>
 #include <iostream>
 #include <fstream>
+#include <filesystem>
 #include <random>
 #include <string_view>
 #include <span>
 #include <limits>
+#include <utility>
+#include <vector>
 
 #include "common/dataset.h"
 #include "engine/robust/engine.h"
@@ -112,6 +115,128 @@ uint32_t CalculatePercentile(const std::vector<size_t>& buckets, const size_t nu
     return std::numeric_limits<uint32_t>::max();
 }
 
+constexpr std::string_view DEFAULT_CSV_FILE = "benchmark_results.csv";
+
+// Everything needed to describe a single run when it is appended to the CSV log.
+// The metrics themselves are filled in once the run has finished; the rest is
+// known up front, from the command line. A row is written only when Label is set.
+struct TCsvContext {
+    std::optional<std::string> Label;
+    std::string CsvFile = std::string(DEFAULT_CSV_FILE);
+    std::string Implementation = "robust";
+    std::string DatasetType;
+    std::string GeneratorType;
+    std::string DataLayout;
+    std::string NodeTopology;
+    size_t LeafSizeLog = 0;
+    bool WithSentinel = false;
+};
+
+struct TRunMetrics {
+    int64_t AvgNsPerQuery = 0;
+    int64_t PeakMemoryKb = 0;
+    std::vector<uint32_t> WallPercentiles;     // wall-clock latency, nanoseconds
+    std::vector<uint32_t> ModifyPercentiles;   // modification latency, TSC cycles
+    std::vector<uint32_t> QueryPercentiles;    // query latency, TSC cycles
+};
+
+std::string_view DatasetTypeName(const NProust::EDatasetType type) {
+    switch (type) {
+        case NProust::EDatasetType::SumInt32: return "SumInt32";
+        case NProust::EDatasetType::MaxInt32: return "MaxInt32";
+        case NProust::EDatasetType::MaxSumInt32: return "MaxSumInt32";
+        case NProust::EDatasetType::OrderStatistic16: return "OrderStatistic16";
+    }
+    return "unknown";
+}
+
+std::string_view BaseGeneratorTypeName(const NProust::EBaseGeneratorType type) {
+    switch (type) {
+        case NProust::EBaseGeneratorType::Point: return "Point";
+        case NProust::EBaseGeneratorType::Range: return "Range";
+    }
+    return "unknown";
+}
+
+std::string_view DataLayoutName(const NProust::EDataLayout layout) {
+    switch (layout) {
+        case NProust::EDataLayout::AoS: return NProust::AOS_LAYOUT_NAME;
+        case NProust::EDataLayout::SoA: return NProust::SOA_LAYOUT_NAME;
+    }
+    return "unknown";
+}
+
+std::string_view NodeTopologyName(const NProust::ENodeTopology topology) {
+    switch (topology) {
+        case NProust::ENodeTopology::Preorder: return NProust::PREORDER_LAYOUT_NAME;
+        case NProust::ENodeTopology::BinaryHeap: return NProust::BINARY_HEAP_LAYOUT_NAME;
+    }
+    return "unknown";
+}
+
+std::string CsvEscape(const std::string& field) {
+    if (field.find_first_of(",\"\n") == std::string::npos) {
+        return field;
+    }
+    std::string escaped = "\"";
+    for (const char c : field) {
+        if (c == '"') {
+            escaped += "\"\"";
+        } else {
+            escaped += c;
+        }
+    }
+    escaped += '"';
+    return escaped;
+}
+
+// Appends a single run as one CSV row, writing a header first if the file is new
+// or empty. Columns are kept as (name, value) pairs so the header and the row can
+// never drift apart.
+void AppendCsvResult(const TCsvContext& context, const size_t length, const size_t queryCount, const TRunMetrics& metrics) {
+    namespace fs = std::filesystem;
+    const bool needHeader = !fs::exists(context.CsvFile) || fs::file_size(context.CsvFile) == 0;
+
+    std::vector<std::pair<std::string, std::string>> columns;
+    columns.emplace_back("label", context.Label.value_or(""));
+    columns.emplace_back("implementation", context.Implementation);
+    columns.emplace_back("dataset_type", context.DatasetType);
+    columns.emplace_back("generator_type", context.GeneratorType);
+    columns.emplace_back("data_layout", context.DataLayout);
+    columns.emplace_back("node_topology", context.NodeTopology);
+    columns.emplace_back("leaf_size_log", std::to_string(context.LeafSizeLog));
+    columns.emplace_back("with_sentinel", context.WithSentinel ? "true" : "false");
+    columns.emplace_back("length", std::to_string(length));
+    columns.emplace_back("query_count", std::to_string(queryCount));
+    columns.emplace_back("avg_ns_per_query", std::to_string(metrics.AvgNsPerQuery));
+    columns.emplace_back("peak_memory_kb", std::to_string(metrics.PeakMemoryKb));
+    for (size_t i = 0; i < TARGET_PERCENTILES.size(); ++i) {
+        columns.emplace_back("wall_ns_p" + TARGET_PERCENTILES[i].Name, std::to_string(metrics.WallPercentiles[i]));
+    }
+    for (size_t i = 0; i < TARGET_PERCENTILES.size(); ++i) {
+        columns.emplace_back("modify_tsc_p" + TARGET_PERCENTILES[i].Name, std::to_string(metrics.ModifyPercentiles[i]));
+    }
+    for (size_t i = 0; i < TARGET_PERCENTILES.size(); ++i) {
+        columns.emplace_back("query_tsc_p" + TARGET_PERCENTILES[i].Name, std::to_string(metrics.QueryPercentiles[i]));
+    }
+
+    std::ofstream out(context.CsvFile, std::ios::app);
+    if (!out) {
+        spdlog::critical("Failed to open CSV file for appending: {}", context.CsvFile);
+        std::terminate();
+    }
+    if (needHeader) {
+        for (size_t i = 0; i < columns.size(); ++i) {
+            out << (i ? "," : "") << CsvEscape(columns[i].first);
+        }
+        out << '\n';
+    }
+    for (size_t i = 0; i < columns.size(); ++i) {
+        out << (i ? "," : "") << CsvEscape(columns[i].second);
+    }
+    out << '\n';
+}
+
 static inline uint64_t StartRDTSC() {
     _mm_lfence();
     return __rdtsc();
@@ -189,15 +314,16 @@ void RunDatasetWithSettings(
     const NProust::EDataLayout layout,
     const NProust::ENodeTopology topology,
     const size_t leafSizeLog,
-    const NProust::EBaseGeneratorType baseGeneratorType
+    const NProust::EBaseGeneratorType baseGeneratorType,
+    const TCsvContext& csvContext
 ) {
     switch (layout) {
         case NProust::EDataLayout::AoS: {
-            DispatchTopologyAndRun<TValue, TOperationResult, TOperation, NProust::TAoSLayout<TValue, TOperationResult, Sentinel>>(streamer, topology, leafSizeLog, baseGeneratorType);
+            DispatchTopologyAndRun<TValue, TOperationResult, TOperation, NProust::TAoSLayout<TValue, TOperationResult, Sentinel>>(streamer, topology, leafSizeLog, baseGeneratorType, csvContext);
             break;
         }
         case NProust::EDataLayout::SoA: {
-            DispatchTopologyAndRun<TValue, TOperationResult, TOperation, NProust::TSoALayout<TValue, TOperationResult, Sentinel>>(streamer, topology, leafSizeLog, baseGeneratorType);
+            DispatchTopologyAndRun<TValue, TOperationResult, TOperation, NProust::TSoALayout<TValue, TOperationResult, Sentinel>>(streamer, topology, leafSizeLog, baseGeneratorType, csvContext);
             break;
         }
     }
@@ -208,20 +334,21 @@ void DispatchTopologyAndRun(
     NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer,
     NProust::ENodeTopology topology,
     size_t leafSizeLog,
-    const NProust::EBaseGeneratorType baseGeneratorType
+    const NProust::EBaseGeneratorType baseGeneratorType,
+    const TCsvContext& csvContext
 ) {
     switch (leafSizeLog) {
-        case 0: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 0>(streamer, topology, baseGeneratorType); break;
-        case 1: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 1>(streamer, topology, baseGeneratorType); break;
-        case 2: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 2>(streamer, topology, baseGeneratorType); break;
-        case 3: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 3>(streamer, topology, baseGeneratorType); break;
-        case 4: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 4>(streamer, topology, baseGeneratorType); break;
-        case 5: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 5>(streamer, topology, baseGeneratorType); break;
-        case 6: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 6>(streamer, topology, baseGeneratorType); break;
-        case 7: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 7>(streamer, topology, baseGeneratorType); break;
-        case 8: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 8>(streamer, topology, baseGeneratorType); break;
-        case 9: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 9>(streamer, topology, baseGeneratorType); break;
-        case 10: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 10>(streamer, topology, baseGeneratorType); break;
+        case 0: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 0>(streamer, topology, baseGeneratorType, csvContext); break;
+        case 1: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 1>(streamer, topology, baseGeneratorType, csvContext); break;
+        case 2: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 2>(streamer, topology, baseGeneratorType, csvContext); break;
+        case 3: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 3>(streamer, topology, baseGeneratorType, csvContext); break;
+        case 4: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 4>(streamer, topology, baseGeneratorType, csvContext); break;
+        case 5: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 5>(streamer, topology, baseGeneratorType, csvContext); break;
+        case 6: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 6>(streamer, topology, baseGeneratorType, csvContext); break;
+        case 7: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 7>(streamer, topology, baseGeneratorType, csvContext); break;
+        case 8: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 8>(streamer, topology, baseGeneratorType, csvContext); break;
+        case 9: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 9>(streamer, topology, baseGeneratorType, csvContext); break;
+        case 10: RunWithDispatchedTopology<TValue, TOperationResult, TOperation, TDataLayout, 10>(streamer, topology, baseGeneratorType, csvContext); break;
         default: {
             spdlog::critical("Unsupported value of {}: {}", LEAF_SIZE_LOG_PARAM, leafSizeLog);
             std::terminate();
@@ -233,22 +360,23 @@ template<class TValue, class TOperationResult, class TOperation, NProust::DataLa
 void RunWithDispatchedTopology(
     NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer,
     const NProust::ENodeTopology topology,
-    const NProust::EBaseGeneratorType baseGeneratorType
+    const NProust::EBaseGeneratorType baseGeneratorType,
+    const TCsvContext& csvContext
 ) {
     switch (topology) {
         case NProust::ENodeTopology::BinaryHeap: {
-            RunDataset<TValue, TOperationResult, TOperation, TDataLayout, NProust::TBinaryHeapNodeTopology<LeafSizeLog>, LeafSizeLog>(streamer, baseGeneratorType);
+            RunDataset<TValue, TOperationResult, TOperation, TDataLayout, NProust::TBinaryHeapNodeTopology<LeafSizeLog>, LeafSizeLog>(streamer, baseGeneratorType, csvContext);
             break;
         }
         case NProust::ENodeTopology::Preorder: {
-            RunDataset<TValue, TOperationResult, TOperation, TDataLayout, NProust::TPreorderNodeTopology<LeafSizeLog>, LeafSizeLog>(streamer, baseGeneratorType);
+            RunDataset<TValue, TOperationResult, TOperation, TDataLayout, NProust::TPreorderNodeTopology<LeafSizeLog>, LeafSizeLog>(streamer, baseGeneratorType, csvContext);
             break;
         }
     }
 }
 
 template<class TValue, class TOperationResult, class TOperation, NProust::DataLayout<TValue, TOperationResult> TDataLayout, NProust::NodeTopology TNodeTopology, size_t LeafSizeLog>
-void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer, NProust::EBaseGeneratorType baseGeneratorType) {
+void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer, NProust::EBaseGeneratorType baseGeneratorType, const TCsvContext& csvContext) {
     std::vector<TWeightedDurations> weightedDurations;
     std::vector<size_t> cyclesSetValue(MAX_CYCLES_PER_OPERATION, 0);
     std::vector<size_t> cyclesComputeRange(MAX_CYCLES_PER_OPERATION, 0);
@@ -385,9 +513,25 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
     spdlog::info("The run has finished successfully. {} queries processed in {} ms ({} ns on average per query)", readCount, runTimeElapsedMs, durationPerQuery);
 
     std::sort(weightedDurations.begin(), weightedDurations.end(), [](const auto& lhs, const auto& rhs) {return lhs.AvgDuration < rhs.AvgDuration;});
-    spdlog::info("Peak memory usage: {} Kb", GetPeakMemoryUsageKB());
+
+    // Gather all the reported numbers into a single struct, so the same values
+    // feed both the human-readable log below and the optional CSV row.
+    TRunMetrics metrics;
+    metrics.AvgNsPerQuery = durationPerQuery;
+    metrics.PeakMemoryKb = GetPeakMemoryUsageKB();
     for (const auto& percentile : TARGET_PERCENTILES) {
-        spdlog::info("Approximate percentile [{}]: {} ns", percentile.Name, CalculatePercentile(weightedDurations, percentile.Numerator, percentile.Denominator));
+        metrics.WallPercentiles.push_back(CalculatePercentile(weightedDurations, percentile.Numerator, percentile.Denominator));
+    }
+    for (const auto& percentile : TARGET_PERCENTILES) {
+        metrics.ModifyPercentiles.push_back(CalculatePercentile(cyclesSetValue, percentile.Numerator, percentile.Denominator));
+    }
+    for (const auto& percentile : TARGET_PERCENTILES) {
+        metrics.QueryPercentiles.push_back(CalculatePercentile(cyclesComputeRange, percentile.Numerator, percentile.Denominator));
+    }
+
+    spdlog::info("Peak memory usage: {} Kb", metrics.PeakMemoryKb);
+    for (size_t i = 0; i < TARGET_PERCENTILES.size(); ++i) {
+        spdlog::info("Approximate percentile [{}]: {} ns", TARGET_PERCENTILES[i].Name, metrics.WallPercentiles[i]);
     }
 
     // TSC usage is somehow controversial, but I still do that.
@@ -407,11 +551,18 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
     //
     // So, you need to be aware of your CPU architecture to correctly interpret the results. Use the
     // TSC cycles as a kind of an abstract time/performance units.
-    for (const auto& percentile : TARGET_PERCENTILES) {
-        spdlog::info("Modification percentile [{}]: {} TSC cycles", percentile.Name, CalculatePercentile(cyclesSetValue, percentile.Numerator, percentile.Denominator));
+    for (size_t i = 0; i < TARGET_PERCENTILES.size(); ++i) {
+        spdlog::info("Modification percentile [{}]: {} TSC cycles", TARGET_PERCENTILES[i].Name, metrics.ModifyPercentiles[i]);
     }
-    for (const auto& percentile : TARGET_PERCENTILES) {
-        spdlog::info("Query percentile [{}]: {} TSC cycles", percentile.Name, CalculatePercentile(cyclesComputeRange, percentile.Numerator, percentile.Denominator));
+    for (size_t i = 0; i < TARGET_PERCENTILES.size(); ++i) {
+        spdlog::info("Query percentile [{}]: {} TSC cycles", TARGET_PERCENTILES[i].Name, metrics.QueryPercentiles[i]);
+    }
+
+    // The CSV row is written only when a label was supplied; otherwise the run is
+    // a one-off and we leave the log untouched.
+    if (csvContext.Label.has_value()) {
+        AppendCsvResult(csvContext, streamer.GetLength(), streamer.GetQueryCount(), metrics);
+        spdlog::info("Appended run results to '{}' under label '{}'", csvContext.CsvFile, *csvContext.Label);
     }
 }
 
@@ -421,7 +572,6 @@ int main(int argc, char* argv[]) {
     // cold cache.
     PinExecutionThread(0);
 
-    static_assert(std::chrono::high_resolution_clock::is_steady, "High resolution clock is not steady");
     static_assert(std::chrono::high_resolution_clock::period::den, "High resolution clock doesn't have a nanosecond precision");
 
     std::span<char*> args(argv, argc);
@@ -433,6 +583,9 @@ int main(int argc, char* argv[]) {
     std::optional<size_t> leafSizeLog;
     std::optional<NProust::EBaseGeneratorType> baseGeneratorType;
     bool withSentinel = false;
+    std::optional<std::string> csvFn;
+    std::optional<std::string> csvLabel;
+    std::optional<std::string> implementation;
 
     for (auto it = args.begin() + 1; it != args.end(); ++it) {
         std::string_view arg = *it;
@@ -450,6 +603,12 @@ int main(int argc, char* argv[]) {
             withSentinel = true;
         } else if (arg == GENERATOR_TYPE_PARAM) {
             ParseBaseGeneratorTypeArgument(it, args.end(), baseGeneratorType);
+        } else if (arg == CSV_FILE_PARAM) {
+            ParseStringArgument(it, args.end(), csvFn);
+        } else if (arg == CSV_LABEL_PARAM) {
+            ParseStringArgument(it, args.end(), csvLabel);
+        } else if (arg == IMPLEMENTATION_PARAM) {
+            ParseStringArgument(it, args.end(), implementation);
         } else {
             spdlog::critical("Unknown argument: {}", arg);
             std::terminate();
@@ -463,13 +622,26 @@ int main(int argc, char* argv[]) {
     CheckFieldPresence(LEAF_SIZE_LOG_PARAM, leafSizeLog);
     CheckFieldPresence(GENERATOR_TYPE_PARAM, baseGeneratorType);
 
+    // Describe this run for the CSV log. The metrics are filled in later, once the
+    // run has finished; everything else is known from the command line right now.
+    TCsvContext csvContext;
+    csvContext.Label = csvLabel;
+    csvContext.CsvFile = csvFn.value_or(std::string(DEFAULT_CSV_FILE));
+    csvContext.Implementation = implementation.value_or("robust");
+    csvContext.DatasetType = std::string(DatasetTypeName(*datasetType));
+    csvContext.GeneratorType = std::string(BaseGeneratorTypeName(*baseGeneratorType));
+    csvContext.DataLayout = std::string(DataLayoutName(*dataLayout));
+    csvContext.NodeTopology = std::string(NodeTopologyName(*nodeTopology));
+    csvContext.LeafSizeLog = *leafSizeLog;
+    csvContext.WithSentinel = withSentinel;
+
     switch (*datasetType) {
         case NProust::EDatasetType::SumInt32: {
             auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, int32_t>(*datasetFn);
             if (withSentinel) {
-                RunDatasetWithSettings<int32_t, int32_t, NProust::TSumOperation, INT32_SENTINEL>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType);
+                RunDatasetWithSettings<int32_t, int32_t, NProust::TSumOperation, INT32_SENTINEL>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType, csvContext);
             } else {
-                RunDatasetWithSettings<int32_t, int32_t, NProust::TSumOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType);
+                RunDatasetWithSettings<int32_t, int32_t, NProust::TSumOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType, csvContext);
             }
             break;
         }
@@ -479,7 +651,7 @@ int main(int argc, char* argv[]) {
                 spdlog::critical("Sentinel values are not supported for this type of the dataset");
                 std::terminate();
             } else {
-                RunDatasetWithSettings<int32_t, int32_t, NProust::TMaxOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType);
+                RunDatasetWithSettings<int32_t, int32_t, NProust::TMaxOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType, csvContext);
             }
             break;
         }
@@ -491,7 +663,8 @@ int main(int argc, char* argv[]) {
                     *dataLayout,
                     *nodeTopology,
                     *leafSizeLog,
-                    *baseGeneratorType
+                    *baseGeneratorType,
+                    csvContext
                 );
             } else {
                 RunDatasetWithSettings<int32_t, NProustExamples::TMaxSumState, NProustExamples::TMaxSumStateOperation>(
@@ -499,23 +672,25 @@ int main(int argc, char* argv[]) {
                     *dataLayout,
                     *nodeTopology,
                     *leafSizeLog,
-                    *baseGeneratorType
+                    *baseGeneratorType,
+                    csvContext
                 );
             }
             break;
         }
         case NProust::EDatasetType::OrderStatistic16: {
-            auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, std::vector<int32_t>>(*datasetFn);
+            auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, NProustExamples::TTopKState<16>>(*datasetFn);
             if (withSentinel) {
                 spdlog::critical("Sentinel values are not supported for this type of the dataset");
                 std::terminate();
             } else {
-                RunDatasetWithSettings<int32_t, std::vector<int32_t>, NProustExamples::TInverseOrderStatisticOperation<16>>(
+                RunDatasetWithSettings<int32_t, NProustExamples::TTopKState<16>, NProustExamples::TInverseOrderStatisticOperation<16>>(
                     datasetStreamer,
                     *dataLayout,
                     *nodeTopology,
                     *leafSizeLog,
-                    *baseGeneratorType
+                    *baseGeneratorType,
+                    csvContext
                 );
             }
             break;

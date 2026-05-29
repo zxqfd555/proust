@@ -48,10 +48,9 @@ namespace NProustExamples {
             }
         }
 
+        // Defined out-of-line below, once TNaiveMaxSumEngine is a complete type.
         template<typename TValue, typename TOperationResult>
-        static TOperationResult FromMany(const TValue* data, const size_t rangeStart, const size_t rangeEnd) noexcept {
-            return TNaiveMaxSumEngine::ComputeRangeNaively(data, rangeStart, rangeEnd);
-        }
+        static TOperationResult FromMany(const TValue* data, const size_t rangeStart, const size_t rangeEnd) noexcept;
     };
 
     inline std::unique_ptr<NProust::IRangeUpdateEngine<int32_t, TMaxSumState, TMaxSumStateOperation>> CreateMaxSumEngine() {
@@ -124,6 +123,11 @@ namespace NProustExamples {
     private:
         std::vector<int32_t> Elements;
     };
+
+    template<typename TValue, typename TOperationResult>
+    TOperationResult TMaxSumStateOperation::FromMany(const TValue* data, const size_t rangeStart, const size_t rangeEnd) noexcept {
+        return TNaiveMaxSumEngine::ComputeStateNaively(data, rangeStart, rangeEnd);
+    }
 
     inline std::unique_ptr<NProust::IRangeUpdateEngine<int32_t, TMaxSumState, TMaxSumStateOperation>> CreateNaiveMaxSumEngine() {
         return std::make_unique<TNaiveMaxSumEngine>();

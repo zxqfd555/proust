@@ -16,6 +16,9 @@ constexpr std::string_view NODE_TOPOLOGY_PARAM = "--node-topology";
 constexpr std::string_view LEAF_SIZE_LOG_PARAM = "--leaf-size-log";
 constexpr std::string_view WITH_SENTINEL_PARAM = "--with-sentinel";
 constexpr std::string_view GENERATOR_TYPE_PARAM = "--generator-type";
+constexpr std::string_view CSV_FILE_PARAM = "--csv-file";
+constexpr std::string_view CSV_LABEL_PARAM = "--csv-label";
+constexpr std::string_view IMPLEMENTATION_PARAM = "--implementation";
 
 template<class TValue>
 void ParseStringArgument(auto& iterator, const auto& endIterator, TValue& dst) {
