@@ -49,7 +49,7 @@ namespace NProustExamples {
         }
 
         // Defined out-of-line below, once TNaiveMaxSumEngine is a complete type.
-        template<typename TValue, typename TOperationResult>
+        template<typename TOperationResult, typename TValue>
         static TOperationResult FromMany(const TValue* data, const size_t rangeStart, const size_t rangeEnd) noexcept;
     };
 
@@ -124,7 +124,7 @@ namespace NProustExamples {
         std::vector<int32_t> Elements;
     };
 
-    template<typename TValue, typename TOperationResult>
+    template<typename TOperationResult, typename TValue>
     TOperationResult TMaxSumStateOperation::FromMany(const TValue* data, const size_t rangeStart, const size_t rangeEnd) noexcept {
         return TNaiveMaxSumEngine::ComputeStateNaively(data, rangeStart, rangeEnd);
     }

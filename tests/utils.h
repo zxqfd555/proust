@@ -83,7 +83,7 @@ struct TAsymmetricIntWrapperOperationWithFromMany {
         return lhs + rhs;
     }
 
-    template<typename TValue, typename TOperationResult>
+    template<typename TOperationResult, typename TValue>
     inline static TOperationResult FromMany(const TValue* elements, const size_t left, const size_t right) noexcept {
         TOperationResult result = elements[left].Wrapped;
         for (size_t index = left + 1; index < right; ++index) {
@@ -109,7 +109,7 @@ struct TAsymmetricIntWrapperOperationWithUndoAndFromMany {
         return lhs - rhs;
     }
 
-    template<typename TValue, typename TOperationResult>
+    template<typename TOperationResult, typename TValue>
     inline static TOperationResult FromMany(const TValue* elements, const size_t left, const size_t right) noexcept {
         TOperationResult result = elements[left].Wrapped;
         for (size_t index = left + 1; index < right; ++index) {

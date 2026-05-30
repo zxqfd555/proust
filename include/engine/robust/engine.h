@@ -298,7 +298,7 @@ namespace NProust {
 
         inline TOperationResult ComputeRangeBruteForce(const size_t rangeStart, const size_t rangeEnd) const {
             if constexpr (HasFromMany<TOperation, TValue, TOperationResult>) {
-                return TOperation::FromMany(PointValues.data(), rangeStart, rangeEnd);
+                return TOperation::template FromMany<TOperationResult>(PointValues.data(), rangeStart, rangeEnd);
             } else {
                 auto result = TOperation::template FromRepeated<TValue, TOperationResult>(PointValues[rangeStart], 1);
                 for (size_t index = rangeStart + 1; index < rangeEnd; ++index) {
@@ -346,6 +346,11 @@ namespace NProust {
             // Being a power of two, the tree takes 2x nodes from the length
             NodeValues.resize(AllocatedLength << 1);
 
+            // The raw point values are kept alongside the tree so the FromMany fast path
+            // can rebuild a leaf's result from the original values (not from merged results).
+            PointValues.resize(AllocatedLength);
+            std::fill(PointValues.begin(), PointValues.end(), TValue());
+
             // Initialize the tree with the default values starting from the leafs
             const auto leafValue = TOperation::template FromRepeated<TValue, TOperationResult>(TValue(), 1);
             std::fill(NodeValues.begin(), NodeValues.end(), leafValue);
@@ -357,6 +362,10 @@ namespace NProust {
         virtual void SetPoint(const size_t position, const TValue& value) override {
             assert(position < AllocatedLength && "The position is beyond the allocated size");
             size_t nodePosition = AllocatedLength + position;
+
+            // Keep the raw value current before any leaf rebuild: the FromMany path in
+            // ComputeRangeBruteForce reads PointValues, so it must already reflect this update.
+            PointValues[position] = value;
 
             const size_t largeLeafStart = position & ~(LEAF_SIZE - 1);
 
@@ -430,7 +439,7 @@ namespace NProust {
         inline TOperationResult ComputeRangeBruteForce(const size_t rangeStart, const size_t rangeEnd) const {
             assert(rangeStart < rangeEnd);
             if constexpr (HasFromMany<TOperation, TValue, TOperationResult>) {
-                return TOperation::FromMany(NodeValues.data(), AllocatedLength + rangeStart, AllocatedLength + rangeEnd);
+                return TOperation::template FromMany<TOperationResult>(PointValues.data(), rangeStart, rangeEnd);
             } else {
                 auto result = NodeValues[AllocatedLength + rangeStart];
                 for (size_t index = AllocatedLength + rangeStart + 1; index < AllocatedLength + rangeEnd; ++index) {

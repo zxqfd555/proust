@@ -6,20 +6,16 @@
 #include <array>
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 
 #include "engine/robust/engine.h"
 #include "engine/operations.h"
 #include "serialization/common.h"
 
 namespace NProustExamples {
-    // The state is the up-to-Capacity largest *distinct* values of a range, kept
-    // sorted in descending order. It used to be a std::vector<int32_t>, which meant
-    // a heap allocation on every Merge/FromRepeated and a pointer chase on every
-    // node read. Here it is a fixed-capacity inline value: trivially copyable, stored
-    // densely inside the SoA node arrays, and merged without touching the allocator.
     template<size_t Capacity>
     struct TTopKState {
-        uint32_t Size = 0;
+        uint32_t Size = 0;  // Not a size_t for tighter data packing.
         std::array<int32_t, Capacity> Values{};
 
         bool operator==(const TTopKState& other) const noexcept {
@@ -40,7 +36,7 @@ namespace NProustExamples {
         using TState = TTopKState<StatisticsRequired>;
 
         template<typename TValue, typename TOperationResult>
-        static TOperationResult FromRepeated(const TValue& v, size_t /*times*/) noexcept {
+        inline static TOperationResult FromRepeated(const TValue& v, size_t /*times*/) noexcept {
             if constexpr (std::is_same_v<TValue, int32_t> && std::is_same_v<TOperationResult, TState>) {
                 // Since each value is counted only once, the result contains only a single element.
                 TOperationResult result;
@@ -53,7 +49,7 @@ namespace NProustExamples {
         }
 
         template<typename TOperationResult>
-        static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) noexcept {
+        inline static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) noexcept {
             if constexpr (std::is_same_v<TOperationResult, TState>) {
                 // A bounded two-way merge of two descending, distinct sequences. We take the
                 // larger front each step and, on a tie, take it once and drop the duplicate,
@@ -79,6 +75,35 @@ namespace NProustExamples {
                 return result;
             } else {
                 static_assert(sizeof(TOperationResult) == 0, "Unsupported type for TOrderStatisticOperation::Merge");
+            }
+        }
+
+        template<typename TOperationResult, typename TValue>
+        inline static TOperationResult FromMany(const TValue* data, size_t fromIndex, size_t toIndex) noexcept {
+            if constexpr (std::is_same_v<TValue, int32_t> && std::is_same_v<TOperationResult, TState>) {
+                TOperationResult result;
+                TOperationResult currentBlock;
+
+                for (size_t index = fromIndex; index < toIndex; ++index) {
+                    if (currentBlock.Size < StatisticsRequired) {
+                        currentBlock.Values[currentBlock.Size++] = data[index];
+                    } else {
+                        std::sort(currentBlock.Values.data(), currentBlock.Values.data() + currentBlock.Size, std::greater<int32_t>());
+                        currentBlock.Size = std::unique(currentBlock.Values.data(), currentBlock.Values.data() + currentBlock.Size) - currentBlock.Values.data();
+                        result = Merge(result, currentBlock);
+
+                        currentBlock.Size = 1;
+                        currentBlock.Values[0] = data[index];
+                    }
+                }
+
+                std::sort(currentBlock.Values.data(), currentBlock.Values.data() + currentBlock.Size, std::greater<int32_t>());
+                currentBlock.Size = std::unique(currentBlock.Values.data(), currentBlock.Values.data() + currentBlock.Size) - currentBlock.Values.data();
+                result = Merge(result, currentBlock);
+
+                return result;
+            } else {
+                static_assert(sizeof(TOperationResult) == 0, "Unsupported type for TOrderStatisticOperation::FromMany");
             }
         }
     };
