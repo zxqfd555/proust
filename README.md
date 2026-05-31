@@ -4,13 +4,17 @@ This repo is a deep-dive on building a robust universal range query engine in C+
 
 In brief, the main lines are:
 - We use a segment tree as an efficient structure with `O(log N)` time per both modification and query. We suppose that the reader is familiar with this structure and will only describe the optimized and cache-efficient variants.
-- In practice, the `O(log N)` time doesn't mean much: two codes with the same asymptotic may differ up to an order of magnitude in terms of both, throughput and the tail latency. The most of the effort is concentrated on obtaining practical results and reliable benchmarking.
+- In practice, the `O(log N)` time doesn't mean much: two codes with the same asymptotic may differ up to an order of magnitude in terms of both, throughput and the tail latency. Most of the effort is concentrated on obtaining practical results and reliable benchmarking.
 
 ## Table of Contents
 
 - [The Task](#the-task)
 - [Examples](#examples)
 - [Interfaces](#interfaces)
+- [Optional operation extensions](#optional-operation-extensions)
+  - [Undo (HasUndo)](#undo-hasundo)
+  - [FromMany (HasFromMany)](#frommany-hasfrommany)
+    - [SIMD discussion](#simd-discussion)
 - [Building a robust engine](#building-a-robust-engine)
   - [Memory management](#memory-management)
   - [Node topology](#node-topology)
@@ -40,7 +44,7 @@ VALUES ($i, DefaultValue);  -- for all i in [0, N)
 
 Your goal is to be able to perform two types of operations.
 
-The first operation is an *assignment*. Assignment receives the interval bounds and a value that needs to be assigned. This way, in array intepretation it would look as follows:
+The first operation is an *assignment*. Assignment receives the interval bounds and a value that needs to be assigned. This way, in array interpretation it would look as follows:
 `Structure[i] = UpdateValue` for all `i` where `RangeStart <= i < RangeEnd` holds. In the SQL syntax, it can be represented as follows:
 
 ```sql
@@ -89,7 +93,7 @@ WHERE index >= RangeStart
 
 Until now, the examples are commutative and the types of the result and the value coincide. It is time to explore the benefits of supporting the non-commutative functions and different result types.
 
-Consider a harder task, such as "Maximum Sum" from Leetcode. The task asks us to compute the maximum consecutive subsegment sum that is possible. The platform clearly expects the `O(N)` solution where `N` is the number of elements. It is however possible to use the our engine to solve it in `O(log N)` on an arbitrary subsegment with an `O(N)`preprocessing. The array can also be modified: any kind of assignment can be done in `O(log N)`. That means overall, that for an arrays of a million elements, you can solve several millions of different instances of this problem per second.
+Consider a harder task, such as "Maximum Sum" from Leetcode. The task asks us to compute the maximum consecutive subsegment sum that is possible. The platform clearly expects the `O(N)` solution where `N` is the number of elements. It is however possible to use our engine to solve it in `O(log N)` on an arbitrary subsegment with an `O(N)`preprocessing. The array can also be modified: any kind of assignment can be done in `O(log N)`. That means overall, that for an array of a million elements, you can solve several millions of different instances of this problem per second.
 
 To reduce the problem to the interface described above, suppose that the value type is `integer`, while the type of the result is a composite structure consisting of four fields: the maximum sum over the range of elements, the maximum sum of any prefix of the range, the maximum sum of any suffix of the range, and the sum of all elements within the range.
 
@@ -103,7 +107,7 @@ Now the problem is reduced: we've separated the value and the result types, the 
 
 Finally, note that the maximum sum problem is not unique: the type separation generally allows to solve many problems such as:
 - The dynamic programming problems with subrange queries, where the state is small enough and two states can be merged. An example for that may be a "House Robber" problem from the LeetCode.
-- Although not a dynamic programming problem, the `K`-th order statistics for smaller `K` can also he solved here: the state are the top-`K` values in the subrange.
+- Although not a dynamic programming problem, the `K`-th order statistics for smaller `K` can also be solved here: the state is the top-`K` values in the subrange.
 - The problems requiring the longest subsegment that satisfied the given range. The problem "Hotel" from USACO Gold 2008 can be an example.
 
 ### Interfaces
@@ -117,6 +121,68 @@ So, we have two types: value type `TValue` and the result type `TOperationResult
 
 The design decision here is still to heavily prefer templates over virtual methods, although the latter would probably be simpler. The reason for that is performance: in case of templates, the types are known compile-time, which dramatically improves inlining possibilities. This is clearly not the case with the virtual methods. Note that in real life, the generic implementation is rarely needed: shrinking the template code, where appropriate, is advised.
 
+## Optional operation extensions
+
+The `ValidOperation` concept above is the mandatory minimum: every operation must provide *Repeat* (`FromRepeated`) and *Merge*, and with just those two the engine is already correct and complete. On top of that baseline, the engine recognizes two **optional** capabilities. Neither is required; each, when an operation happens to provide it, unlocks a faster path, and an operation that lacks it simply stays on the generic one. The detection is done with concepts and `if constexpr`, so it costs nothing at runtime and adds no virtual dispatch — an operation that doesn't expose a capability never pays for its absence.
+
+The reason there are exactly two is that they address the two different places where the generic path is wasteful: the *query strategy* on point-update engines, and the *leaf work* at the bottom of any engine. They are independent, and a given operation may expose neither, either, or both (the integer sum, for instance, exposes both).
+
+### Undo (HasUndo)
+
+```cpp
+template<typename TOperation, typename TOperationResult>
+concept HasUndo = requires(const TOperationResult& lhs, const TOperationResult& rhs) {
+    { TOperation::template Undo<TOperationResult>(lhs, rhs) } -> std::same_as<TOperationResult>;
+};
+```
+
+`Undo` is an inverse of `Merge`: given an aggregate and the contribution of one part of it, it recovers the rest. For the sum it is plain subtraction (`Undo(a, b) = a - b`); for xor it is xor again. Many operations have no such inverse at all — you cannot meaningfully "subtract" a maximum, a maximum-subarray state, or a set of order statistics out of an aggregate, since the information needed to do so was discarded by the merge.
+
+When the inverse is available, the single-point engines answer a range query as the difference of two prefixes, `Undo(prefix(r), prefix(l))`, walking one root-to-leaf path instead of assembling the `O(log N)` canonical nodes that tile the range. It is also the hard requirement of the Fenwick-style `TFatPointUpdateEngine`, which keeps running prefixes across wide nodes and therefore must be able to fold deltas in and back out. The point-update factory dispatches on precisely this concept: when `HasUndo` holds it hands back the fat, prefix-based engine; otherwise it falls back to the plain binary tree that tiles the range from canonical nodes. The mechanics of both are detailed in [Single point modifications](#single-point-modifications).
+
+### FromMany (HasFromMany)
+
+```cpp
+template<typename TOperation, typename TValue, typename TOperationResult>
+concept HasFromMany = requires(const TValue* data, size_t fromIndex, size_t toIndex) {
+    { TOperation::template FromMany<TOperationResult>(data, fromIndex, toIndex) } -> std::same_as<TOperationResult>;
+};
+```
+
+`FromMany` builds a result straight from a contiguous run of raw `TValue`: it receives a pointer and a half-open `[fromIndex, toIndex)` range and returns the aggregate over them in a single call. The generic alternative is to fold the block element by element, merging `FromRepeated(value, 1)` into an accumulator once per element; `FromMany` lets an operation that can summarize a whole run more cheaply do so in one shot — summing a strip of integers is the obvious example. It is consulted exactly where the engine meets a contiguous strip of raw values: at the fat leaves of the range engine, both when rebuilding a leaf during an assignment and when answering a query that ends inside one, and at the brute-force off-cuts of the point engine. Where it is absent, the engine quietly uses the `Merge` loop instead.
+
+#### SIMD discussion
+
+The shape of `FromMany` is an open invitation to SIMD. It is handed a flat, contiguous buffer and a range and asked for a reduction over them — exactly the pattern that maps onto vector instructions: load eight lanes, combine them with one wide instruction, advance, repeat. Reaching for `_mm256_add_epi32` on the integer sum, or `_mm256_max_epi32` on the maximum, looks like the obvious next step, and the interface was deliberately shaped to permit it.
+
+In practice the case for doing it by hand turned out to be hard to justify, because the blocks `FromMany` actually sees are small. A fat leaf spans `LeafSize` elements and a partial leaf fewer, and the whole purpose of the surrounding machinery — cached subtree values, lazy tags, prefix walks — is to *avoid* scanning long runs in the first place. The vectorizable part is therefore a short tail, dominated by call and reduction overhead rather than by steady-state throughput.
+
+We tested it regardless. We added hand-written AVX2 variants of both the sum and the maximum/minimum operations and benchmarked them against the scalar versions, pushing the leaves all the way to `LeafSizeLog = 10` — blocks of 1024 elements — to hand the vector code as much contiguous work as the structure allows. The outcome was no measurable gain at any leaf size, in either the range or the point engine; at the largest leaves the explicit AVX2 was, if anything, marginally slower.
+
+Disassembling the compiled scalar operation explains why. Under the release flags (`-O3 -march=native`) the compiler already auto-vectorizes the `FromMany` reduction on its own. The inner loop of the integer-sum `FromMany` compiles to a 256-bit accumulation followed by a horizontal fold:
+
+```asm
+.L4:                                    ; hot loop — one 256-bit accumulator (%ymm1)
+        vpaddd  (%rax), %ymm1, %ymm1    ; add 8 int32 lanes at once
+        addq    $32, %rax               ; advance by 8 elements (32 bytes)
+        cmpq    %rdx, %rax
+        jne     .L4
+        vmovdqa %xmm1, %xmm0            ; horizontal reduction of the 8 lanes:
+        vextracti128 $0x1, %ymm1, %xmm1 ;   fold the high 128 bits into the low,
+        vpaddd  %xmm1, %xmm0, %xmm0     ;   then add the halves pairwise,
+        vpsrldq $8, %xmm0, %xmm1
+        vpaddd  %xmm1, %xmm0, %xmm0
+        vpsrldq $4, %xmm0, %xmm1
+        vpaddd  %xmm1, %xmm0, %xmm0     ;   down to a single int32
+        vmovd   %xmm0, %eax
+```
+
+That is the very same `vpaddd` over a `%ymm` register we would have written by hand. The maximum reduces identically, with `vpmaxsd` in place of `vpaddd`. There is simply nothing for hand-written intrinsics to add.
+
+One nuance deserves a precise statement, since it is easy to assume more than is true. The auto-vectorized loop above uses a *single* vector accumulator (`%ymm1`); under the default flags the compiler does **not** unroll the reduction across several independent accumulators to hide the latency of the dependent `vpaddd` chain. A four-accumulator form — produced either by hand-written intrinsics or by adding `-funroll-loops -fvariable-expansion-in-unroller` — is genuinely faster, but only on long, isolated reductions of hundreds to thousands of elements; for the sum that flag alone closes the entire gap, and for the maximum it narrows it. (Notably, hand-unrolling the *source* into four accumulators achieves nothing on its own: the optimizer's reduction recognizer merges them straight back into one.) None of this reaches the engine, for the same reason as before — the blocks are far too short for accumulator-level parallelism to pay off.
+
+The conclusion is that we did not implement SIMD for any of the provided operations ourselves. The compiler vectorizes the simple reductions for us, and the structure never feeds them runs long enough for a hand-tuned kernel to earn its keep. The `HasFromMany` interface nevertheless leaves the door fully open: an operation whose block summary is genuinely expensive, or a deployment that deliberately runs very fat leaves, is free to supply a vectorized `FromMany`, and the engine will pick it up with no other change.
+
 ## Building a robust engine
 
 We start solving this problem with a segment tree implementation. Please refer to a comprehensive tutorial on the topic if you haven't worked with the segment trees before. Below is a brief explanation.
@@ -127,7 +193,7 @@ Each node then contains two values:
 - The value of the target function `Func` for all of the elements that correspond to the range denoted by the node. That is, the root node contains the value of the target function for all of the elements. This is clearly a `TOperationResult` in the terms above.
 - Optional: if all of the elements are corresponding to a certain element, the value of this element. This is trickier, and in the general case it is `std::optional<TValue>`.
 
-When an assignment takes place, we descend from the root, tareting the nodes affected by the modification range. Once the modification range covers the node in full, we update the optional described above with an actual value and don't traverse further. The value of the target function is then just the result of the repetition (*Repeat* conversion) of the target value as many times as the number of elements in the range corresponding to the node.
+When an assignment takes place, we descend from the root, targeting the nodes affected by the modification range. Once the modification range covers the node in full, we update the optional described above with an actual value and don't traverse further. The value of the target function is then just the result of the repetition (*Repeat* conversion) of the target value as many times as the number of elements in the range corresponding to the node.
 
 When we go back, we recalculate the value of the function in the parent nodes: the modification has changed this value in children, the parent needs to be updated as well. This uses *Merge* conversion.
 
@@ -163,13 +229,13 @@ Both layouts have pros and cons: the binary heap layout is easier to adjust when
 
 #### SoA versus AoS
 
-When the numbering is done, there are two ways to place the complex node structure in memory. The first way is to use an array consisting of structures, in our case, pairs of a `TValueResult` for the node value and the `std::optional<TValue>` for the lazily propagated value. This layout is called an *array of structures*, or simply *AoS*.
+When the numbering is done, there are two ways to place the complex node structure in memory. The first way is to use an array consisting of structures, in our case, pairs of a `TOperationResult` for the node value and the `std::optional<TValue>` for the lazily propagated value. This layout is called an *array of structures*, or simply *AoS*.
 
-*AoS* has several problems, due to which it is often discouraged. The principal problem is *padding* that undermines cache efficiency if the size of the padded structure is bigger that just the sum of the type sizes: the structures are placed in memory consequently, and we want the cache line to contain as much useful information as possible. Adding the meaningless padding bytes instead of our data is a bad strategy.
+*AoS* has several problems, due to which it is often discouraged. The principal problem is *padding* that undermines cache efficiency if the size of the padded structure is bigger that just the sum of the type sizes: the structures are placed in memory consecutively, and we want the cache line to contain as much useful information as possible. Adding the meaningless padding bytes instead of our data is a bad strategy.
 
-To address that, the layout called *structure of arrays*, or simply *SoA* is used. The data is then stored as two arrays: one for the `TValueResult`, and one for `std::optional<TValue>`. The influence of padding is much smaller since all of the elements in each of the arrays have the same type. It allows to pack the data more tightly and to use the cache lines more efficiently.
+To address that, the layout called *structure of arrays*, or simply *SoA* is used. The data is then stored as two arrays: one for the `TOperationResult`, and one for `std::optional<TValue>`. The influence of padding is much smaller since all of the elements in each of the arrays have the same type. It allows to pack the data more tightly and to use the cache lines more efficiently.
 
-Both layouts have been implemented in the engine. You may implement your own: the only requirement is to satisfy the concept. Though both are melticulosly tested, the benchmarks rely on *SoA* due to the considerations described above.
+Both layouts have been implemented in the engine. You may implement your own: the only requirement is to satisfy the concept. Though both are meticulously tested, the benchmarks rely on *SoA* due to the considerations described above.
 
 #### Packing densely when possible
 
@@ -230,7 +296,7 @@ This split is why the point-update factory dispatches on the operation: when an 
 
 ## Benchmarking methodology
 
-There are two common variations of the task: the one where the modification is a segment, and the one where the modification is a point. The latter is clearly a subtask of a more generic case, having `RangeStart = RangeEnd - 1`. The extra constaint allows to solve the task more efficiently: in the same `O(log N)` complexity, but with smaller constant factor and better measurements. It therefore makes sense to compare the both.
+There are two common variations of the task: the one where the modification is a segment, and the one where the modification is a point. The latter is clearly a subtask of a more generic case, having `RangeStart = RangeEnd - 1`. The extra constraint allows to solve the task more efficiently: in the same `O(log N)` complexity, but with smaller constant factor and better measurements. It therefore makes sense to compare the both.
 
 As for the generic setup, four tasks were chosen:
 1. The task where `Func` corresponds to the element sum.
@@ -247,24 +313,24 @@ To achieve correctness, we first decouple the dataset creation and the dataset e
 The measurement precision is harder to achieve on a regular hardware. A few things are done in the benchmarking harness to reduce jitter:
 - The execution is pinned to a single core. This way we avoid the effect of cold cache when a context switch task place. The pinning is also necessary to ensure the correctness of RDTSC calls, used for time measurements.
 - The first 5% of the dataset is excluded from the analytics. This data serve for the warmup, to soften the effects of a cold start.
-- The number of programs running at this time in the OS is reduced to minimum.
+- The number of programs running at this time in the OS is reduced to a minimum.
 
 These measurements are not enough: the interrupts can still be handled by the core that executes the benchmarking harness. In addition, even though the process is pinned to a single core, other processes may also occupy this core. To avoid that, a separate OS-level setup with `isolcpus` must be done in the production environment.
 
 Time measurements are approached from two angles.
 
-First of all, we natually want to use the wall clock, or, to be more exact, monotonic high precision clock in C++ to measure the amount of time spent in the most natural way. This is not ideal: as we will see further, in some of the cases the code runs in around 50 nanosecond per query, moreover, we need a way to evaluate improvements that are around 5-10 per cent of the above. The overheads of the syscall for getting current time will affect the precision of the measurement. We therefore bulk the queries into the batches of several hundreed, and measure the time twice: at the beginning of the batch processing and at the end of this processing. The duration, divided by the size of the batch, gives an approximation over a single query length within.
+First of all, we naturally want to use the wall clock, or, to be more exact, monotonic high precision clock in C++ to measure the amount of time spent in the most natural way. This is not ideal: as we will see further, in some of the cases the code runs in around 50 nanosecond per query, moreover, we need a way to evaluate improvements that are around 5-10 per cent of the above. The overheads of the syscall for getting current time will affect the precision of the measurement. We therefore bulk the queries into the batches of several hundred, and measure the time twice: at the beginning of the batch processing and at the end of this processing. The duration, divided by the size of the batch, gives an approximation over a single query length within.
 
 The approach above has clear limits, and the worst part is an impossibility to distinguish, in the mixed datasets, the durations and the percentiles of an assignment and the durations and percentiles of a query. The lightweight solution here is to use RDTSC and measure the execution in TSC ticks.
 
 Without giving all of the important historical details of the TSC (this may take a long while), there are several vital considerations to make:
-- The methods that get the number of ticks at the start and at the end of the measurement have to be different, because proper memory and compiler fences must be applied. Thus, for the start of the computation, reading of the counter is preceeded by `LFENCE`. Note that in the general case, this instruction does not give enough fencing guarantees for you - it only makes sure that the load operations *before* the fence are executed; however, on Intel CPUs it gives stronger guarantees in practice and can be used here. Note that it is not the same for AMD, and you'll need to use something serializing like `CPUID`. In turn, the finish of the execution is measured with `RDTSCP` that waits for everything to be serialized before.
+- The methods that get the number of ticks at the start and at the end of the measurement have to be different, because proper memory and compiler fences must be applied. Thus, for the start of the computation, reading of the counter is preceded by `LFENCE`. Note that in the general case, this instruction does not give enough fencing guarantees for you - it only makes sure that the load operations *before* the fence are executed; however, on Intel CPUs it gives stronger guarantees in practice and can be used here. Note that it is not the same for AMD, and you'll need to use something serializing like `CPUID`. In turn, the finish of the execution is measured with `RDTSCP` that waits for everything to be serialized before.
 - The CPU is not the only thing that could initiate rearrangement of the instructions: the compiler could do that as well. In order to do that, we use compiler fences.
-- We deliberately don't translate the TSC ticks into nanoseconds, although in some cases it is possible. The reason for that is that there are different types of TSC, and not all of then ensure the independence from C-states, P-states and T-states; without that, it is impossible to ensure a precise translation. The computer used to run the benchmarks has however, invariant TSC that allows the same. Therefore, basic intuitions on that will be given.
+- We deliberately don't translate the TSC ticks into nanoseconds, although in some cases it is possible. The reason for that is that there are different types of TSC, and not all of them ensure the independence from C-states, P-states and T-states; without that, it is impossible to ensure a precise translation. The computer used to run the benchmarks has however, invariant TSC that allows the same. Therefore, basic intuitions on that will be given.
 
 ## Ensuring code quality
 
-The project is done by a single person, without possibility to establish code review process. Essentially, it highlights the need for establishing good practices, along which are:
+The project is done by a single person, without possibility to establish code review process. Essentially, it highlights the need for establishing good practices, among which are:
 - An appropriate set of sanitizers is applied, when tests are run. We sanitize addresses, undefined behavior and memory leaks. The thread sanitizer is not applied here: the code is single-threaded and targets squeezing nanoseconds.
 - Basic tools, such as clang-tidy are put in place.
 - The testing is done as a stress test. There is a simplified test suite though, where the reduced versions of the tests are present. They serve as the first line of defense: allowing to have something very simple and catching the most common bugs.
@@ -280,8 +346,8 @@ Once the instance of the task is chosen, the following is done:
 
 The whole thing is supposed to be buildable with CMake. Conan v2.22.2 was used for the package management. Use your best judgement, if you're familiar with the package manager. Otherwise, here are the key points you need to know in order to make everything running.
 
-First, you will need to configure a Conan build profile. You can do that with `conan profile detect`. If nonexistent before, the profile will be created. You can view it with `conan profile show`. You may equally want to set edit certain settings. For instance, you'll need C++23 (specify that in `compiler.cppstd`). You may also want to change the type of compiler.
+First, you will need to configure a Conan build profile. You can do that with `conan profile detect`. If nonexistent before, the profile will be created. You can view it with `conan profile show`. You may equally want to edit certain settings. For instance, you'll need C++23 (specify that in `compiler.cppstd`). You may also want to change the type of compiler.
 
 Note that with the default configuration, one Conan profile means one build mode: either debug or release, but not both. Due to that, if you want to develop the engine or run the tests properly, you will need put in place, another profile, for debugging purposes. You can do that by first, duplicating the existing one with `conan profile detect --name=debug`, and then editing it - in particular you'll need to set `compiler.runtime_type=Debug`.
 
-One you're done with profiles, you can first checkout the dependencies from the C++ package repository. You can do that with `conan install . --output-folder=build --build=missing --profile=debug` (note that you'll need to omit this `profile=...` part for release). Conan will checkout only one version of a package, either debug or release. Then, prepare CMake with `cmake -B build -DCMAKE_TOOLCHAIN_FILE="build/generators/conan_toolchain.cmake"`. And then, you're ready to build with `cmake --build build` for debug or `cmake --build build --config Release` for release. Make sure that you align your Conan profile with the mode that will be used for the build. Of course, once the preparation is done, once you edit the code, you can run only that last `cmake --build build` command.
+Once you're done with profiles, you can first checkout the dependencies from the C++ package repository. You can do that with `conan install . --output-folder=build --build=missing --profile=debug` (note that you'll need to omit this `profile=...` part for release). Conan will checkout only one version of a package, either debug or release. Then, prepare CMake with `cmake -B build -DCMAKE_TOOLCHAIN_FILE="build/generators/conan_toolchain.cmake"`. And then, you're ready to build with `cmake --build build` for debug or `cmake --build build --config Release` for release. Make sure that you align your Conan profile with the mode that will be used for the build. Of course, once the preparation is done, once you edit the code, you can run only that last `cmake --build build` command.
