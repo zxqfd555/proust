@@ -99,21 +99,28 @@ namespace NProust {
                 } else {
                     std::fill(LazySnapshot.begin() + segmentStart, LazySnapshot.begin() + segmentEnd, value);
 
-                    TOperationResult subtreeValue = TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[nodeStart], 1);
-                    if (segmentStart > nodeStart) {  // TODO: FromMany usage
-                        for (size_t index = nodeStart + 1; index < segmentStart; ++index) {
+                    if constexpr (HasFromMany<TOperation, TValue, TOperationResult>) {
+                        // With no pending lazy tag, the snapshot now holds the leaf's full content
+                        // over [nodeStart, nodeEnd) (the [segmentStart, segmentEnd) slice was just
+                        // overwritten with `value`), so the subtree value is a single bulk build.
+                        Nodes.SetSubtreeValue(nodeId, TOperation::template FromMany<TOperationResult>(LazySnapshot.data(), nodeStart, nodeEnd));
+                    } else {
+                        TOperationResult subtreeValue = TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[nodeStart], 1);
+                        if (segmentStart > nodeStart) {
+                            for (size_t index = nodeStart + 1; index < segmentStart; ++index) {
+                                subtreeValue = TOperation::Merge(subtreeValue, TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[index], 1));
+                            }
+                            subtreeValue = TOperation::Merge(subtreeValue, TOperation::template FromRepeated<TValue, TOperationResult>(value, segmentEnd - segmentStart));
+                        } else {
+                            subtreeValue = TOperation::template FromRepeated<TValue, TOperationResult>(value, segmentEnd - segmentStart);
+                        }
+
+                        for (size_t index = segmentEnd; index < nodeEnd; ++index) {
                             subtreeValue = TOperation::Merge(subtreeValue, TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[index], 1));
                         }
-                        subtreeValue = TOperation::Merge(subtreeValue, TOperation::template FromRepeated<TValue, TOperationResult>(value, segmentEnd - segmentStart));
-                    } else {
-                        subtreeValue = TOperation::template FromRepeated<TValue, TOperationResult>(value, segmentEnd - segmentStart);
-                    }
 
-                    for (size_t index = segmentEnd; index < nodeEnd; ++index) {
-                        subtreeValue = TOperation::Merge(subtreeValue, TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[index], 1));
+                        Nodes.SetSubtreeValue(nodeId, std::move(subtreeValue));
                     }
-
-                    Nodes.SetSubtreeValue(nodeId, std::move(subtreeValue));
                 }
             } else {
                 const size_t midpoint = (nodeStart + nodeEnd) >> 1;
@@ -160,11 +167,15 @@ namespace NProust {
             if (TNodeTopology::IsLeaf(nodeEnd - nodeStart)) {
                 const size_t segmentStart = std::max(rangeStart, nodeStart);
                 const size_t segmentEnd = std::min(rangeEnd, nodeEnd);
-                TOperationResult result = TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[segmentStart], 1);
-                for (size_t index = segmentStart + 1; index < segmentEnd; ++index) {  // TODO: FromMany
-                    result = TOperation::Merge(result, TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[index], 1));
+                if constexpr (HasFromMany<TOperation, TValue, TOperationResult>) {
+                    return TOperation::template FromMany<TOperationResult>(LazySnapshot.data(), segmentStart, segmentEnd);
+                } else {
+                    TOperationResult result = TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[segmentStart], 1);
+                    for (size_t index = segmentStart + 1; index < segmentEnd; ++index) {
+                        result = TOperation::Merge(result, TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[index], 1));
+                    }
+                    return result;
                 }
-                return result;
             } else {
                 const size_t midpoint = (nodeStart + nodeEnd) >> 1;
                 if (midpoint > rangeStart) {
