@@ -19,6 +19,7 @@ constexpr std::string_view GENERATOR_TYPE_PARAM = "--generator-type";
 constexpr std::string_view CSV_FILE_PARAM = "--csv-file";
 constexpr std::string_view CSV_LABEL_PARAM = "--csv-label";
 constexpr std::string_view IMPLEMENTATION_PARAM = "--implementation";
+constexpr std::string_view MEASUREMENT_MODE_PARAM = "--measurement-mode";
 
 template<class TValue>
 void ParseStringArgument(auto& iterator, const auto& endIterator, TValue& dst) {

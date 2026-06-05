@@ -77,6 +77,25 @@ IMPLEMENTATIONS: dict[str, dict] = {
         "leaf-size-log": 4,
         "with-sentinel": False,
     },
+    # An external reference baseline: a Fenwick tree fixed to the int32 sum problem with
+    # point modifications (see include/engine/external/fenwick.h). It ignores the layout /
+    # topology / leaf-size knobs — they are passed only because the runner CLI requires them.
+    # It is only meaningful for `--task sum --modification point`.
+    "fenwick": {
+        "data-layout": "SoA",
+        "node-topology": "heap",
+        "leaf-size-log": 4,
+        "with-sentinel": False,
+    },
+    # Another external baseline: the "wide segment tree" from Algorithmica/HPC — a B=16, AVX2
+    # structure (see include/engine/external/algorithmica.h). Same caveats as fenwick: the knobs
+    # below are ignored, and it only models `--task sum --modification point`.
+    "algorithmica": {
+        "data-layout": "SoA",
+        "node-topology": "heap",
+        "leaf-size-log": 4,
+        "with-sentinel": False,
+    },
 }
 
 # A short, human-readable description of every task, used as the preamble of the
@@ -126,6 +145,45 @@ T_95: dict[int, float] = {
     7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228, 12: 2.179, 15: 2.131,
     20: 2.086, 30: 2.042, 60: 2.000,
 }
+
+
+# Above this many nanoseconds a latency reads more naturally in microseconds, so
+# reports promote the unit (and rescale the value) past this threshold. TSC-cycle
+# and memory columns are unaffected — only the "ns" unit is rescaled.
+NS_TO_US_THRESHOLD = 1000
+
+
+def format_ns(value: float) -> tuple[str, str]:
+    """Render a nanosecond quantity, switching to microseconds past the threshold.
+
+    Returns ``(rendered_value, unit)`` so the caller can place the unit wherever
+    it likes. Values at or below the threshold stay in whole nanoseconds; larger
+    ones are shown in microseconds with two decimals.
+    """
+    if value > NS_TO_US_THRESHOLD:
+        return f"{value / 1000.0:,.2f}", "us"
+    return f"{round(value):,}", "ns"
+
+
+def format_measurement(column_unit: str, point: float, halfwidth: float | None) -> tuple[str, str, str]:
+    """Render a (point, CI) measurement pair, returning ``(point, ci, unit)``.
+
+    Only the ``ns`` unit is subject to the microsecond promotion; every other
+    unit is rendered verbatim. The CI follows whatever unit the point estimate
+    settles on, so the two never disagree.
+    """
+    if column_unit == "ns":
+        point_str, unit = format_ns(point)
+        if halfwidth is None:
+            return point_str, "—", unit
+        # The CI follows the point's unit, even when the half-width alone would
+        # not have crossed the microsecond threshold — the two must agree.
+        ci_str = f"{halfwidth / 1000.0:,.2f}" if unit == "us" else f"{round(halfwidth):,}"
+        return point_str, f"± {ci_str}", unit
+
+    point_str = f"{round(point):,}"
+    ci_str = "—" if halfwidth is None else f"± {round(halfwidth):,}"
+    return point_str, ci_str, column_unit
 
 
 def measurement_columns() -> list[tuple[str, str, str]]:
@@ -254,6 +312,7 @@ class Benchmarker:
         implementation: str = "robust",
         runs: int = DEFAULT_RUNS,
         csv_file: str | None = None,
+        measurement_mode: str | None = None,
     ) -> None:
         """Replay datasets against the fast engine and append runs to the CSV.
 
@@ -287,6 +346,7 @@ class Benchmarker:
                     self._execute_one(
                         binary, task, modification, implementation,
                         config, label, csv_path, run_index, runs,
+                        measurement_mode,
                     )
 
     def _execute_one(
@@ -300,6 +360,7 @@ class Benchmarker:
         csv_path: Path,
         run_index: int,
         runs: int,
+        measurement_mode: str | None = None,
     ) -> None:
         command = [
             str(binary),
@@ -313,6 +374,8 @@ class Benchmarker:
             "--csv-label", label,
             "--csv-file", str(csv_path),
         ]
+        if measurement_mode is not None:
+            command += ["--measurement-mode", measurement_mode]
         if config.get("with-sentinel"):
             command.append("--with-sentinel")
 
@@ -368,7 +431,16 @@ class Benchmarker:
             "the median by wall-clock 99.999th-percentile latency. The 95% column "
             "is the confidence interval of the mean across that batch's runs._",
             "",
+            "_Latencies above 1,000 ns are reported in microseconds (us)._",
+            "",
         ]
+
+        # Name the hardware the numbers came from: the CSV records it per run, and a
+        # report only makes sense against the processor that produced it.
+        cpu_models = sorted({row["cpu_model"] for row in rows if row.get("cpu_model")})
+        if cpu_models:
+            lines.append(f"_Processor: {', '.join(cpu_models)}._")
+            lines.append("")
 
         for task in TASKS:
             lines.append(f"## {task}")
@@ -396,10 +468,11 @@ class Benchmarker:
         group_rows, group_label, implementation = group
         summary, _, selection_value = self._summarize_group(group_rows)
 
+        selection_str, selection_unit = format_ns(selection_value)
         caption = (
             f"_Label `{group_label}`, implementation `{implementation}`, "
             f"{len(group_rows)} run(s); selected at {SELECTION_COLUMN} "
-            f"= {round(selection_value):,}._"
+            f"= {selection_str} {selection_unit}._"
         )
 
         table = [
@@ -408,8 +481,8 @@ class Benchmarker:
         ]
         for column, name, unit in measurement_columns():
             point, halfwidth = summary[column]
-            ci = "—" if halfwidth is None else f"± {round(halfwidth):,}"
-            table.append(f"| {name} ({unit}) | {round(point):,} | {ci} |")
+            point_str, ci, effective_unit = format_measurement(unit, point, halfwidth)
+            table.append(f"| {name} ({effective_unit}) | {point_str} | {ci} |")
 
         return [heading, "", preamble, "", caption, "", *table]
 
@@ -569,6 +642,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Label recorded with every run, to distinguish it in the CSV log.",
     )
     execute.add_argument(
+        "--measurement-mode",
+        choices=["per-operation", "average"],
+        default=None,
+        help=(
+            "How the runner times operations: 'per-operation' brackets each op in RDTSC fences "
+            "for percentiles and the modify/query split; 'average' times whole batches for clean "
+            "throughput, without the fence overhead. Omit to use the runner default."
+        ),
+    )
+    execute.add_argument(
         "--csv-file",
         default=None,
         help=f"CSV log to append to (default: {DEFAULT_CSV_FILE}).",
@@ -620,6 +703,7 @@ if __name__ == "__main__":
             implementation=args.implementation,
             runs=args.runs,
             csv_file=args.csv_file,
+            measurement_mode=args.measurement_mode,
         )
     elif args.mode == "report":
         benchmarker.report(

@@ -16,6 +16,8 @@ endif()
 
 add_executable(tests
     test_dataset_serialization.cpp
+    test_external_algorithmica.cpp
+    test_external_fenwick.cpp
     test_fat_engine.cpp
     test_point_update_engine.cpp
     test_range_update_engine.cpp

@@ -9,6 +9,8 @@
 
 #include "common/dataset.h"
 #include "engine/robust/engine.h"
+#include "engine/external/fenwick.h"
+#include "engine/external/algorithmica.h"
 #include "engine/operations.h"
 
 namespace {
@@ -132,7 +134,9 @@ std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation
 enum class ETestedEngineType {
     RangeRobust,
     PointRobust,
-    Fat
+    Fat,
+    ExternalFenwick,
+    AlgorithmicaWideTree
 };
 
 template<
@@ -182,6 +186,31 @@ void StressTest(
             pointUpdateEngine->Init(length);
             break;
         }
+        case (ETestedEngineType::ExternalFenwick): {
+            baseGenerator = std::make_unique<NProust::TPointUpdatePlanGenerator>(length);
+            // The external Fenwick baseline only models the int32 sum problem; it has no
+            // generic instantiation, so guard its construction to that single specialization.
+            if constexpr (std::is_same_v<TValue, int32_t> && std::is_same_v<TOperationResult, int32_t> && std::is_same_v<TOperation, NProust::TSumOperation>) {
+                pointUpdateEngine = NProust::CreateFenwickPointSumEngine();
+            } else {
+                spdlog::critical("The external Fenwick engine only supports the int32 sum problem");
+                std::terminate();
+            }
+            pointUpdateEngine->Init(length);
+            break;
+        }
+        case (ETestedEngineType::AlgorithmicaWideTree): {
+            baseGenerator = std::make_unique<NProust::TPointUpdatePlanGenerator>(length);
+            // The Algorithmica wide segment tree, like Fenwick, is fixed to the int32 sum problem.
+            if constexpr (std::is_same_v<TValue, int32_t> && std::is_same_v<TOperationResult, int32_t> && std::is_same_v<TOperation, NProust::TSumOperation>) {
+                pointUpdateEngine = NProust::CreateAlgorithmicaWideSegmentSumEngine();
+            } else {
+                spdlog::critical("The external Algorithmica engine only supports the int32 sum problem");
+                std::terminate();
+            }
+            pointUpdateEngine->Init(length);
+            break;
+        }
     };
     assert(!!baseGenerator);
     NProust::GenerateTestPlan<TValue, TOperationResult, TOperation>(length, queryCount, *baseGenerator, valueGenerator, writer, std::move(groundTruthEngine));
@@ -204,8 +233,10 @@ void StressTest(
             case NProust::EEngineOperation::SetRange: {
                 assert(planItem.Value.has_value() && "SetRange queries must have the value");
                 switch (testedEngine) {
-                    case (ETestedEngineType::PointRobust): 
-                    case (ETestedEngineType::Fat): {
+                    case (ETestedEngineType::PointRobust):
+                    case (ETestedEngineType::Fat):
+                    case (ETestedEngineType::ExternalFenwick):
+                    case (ETestedEngineType::AlgorithmicaWideTree): {
                         assert(planItem.Left + 1 == planItem.Right && "Incorrect modification for a point-update engine");
                         pointUpdateEngine->SetPoint(planItem.Left, *planItem.Value);
                         break;
@@ -220,8 +251,10 @@ void StressTest(
             case NProust::EEngineOperation::Query: {
                 TOperationResult result;
                 switch (testedEngine) {
-                    case (ETestedEngineType::PointRobust): 
-                    case (ETestedEngineType::Fat): {
+                    case (ETestedEngineType::PointRobust):
+                    case (ETestedEngineType::Fat):
+                    case (ETestedEngineType::ExternalFenwick):
+                    case (ETestedEngineType::AlgorithmicaWideTree): {
                         result = pointUpdateEngine->ComputeRange(planItem.Left, planItem.Right);
                         break;
                     }

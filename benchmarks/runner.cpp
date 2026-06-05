@@ -8,9 +8,14 @@
 #include <limits>
 #include <utility>
 #include <vector>
+#include <string>
+#include <cstring>
+#include <thread>
 
 #include "common/dataset.h"
 #include "engine/robust/engine.h"
+#include "engine/external/fenwick.h"
+#include "engine/external/algorithmica.h"
 #include "engine/operations.h"
 #include "examples/leetcode_maximum_subarray.h"
 #include "examples/leetcode_third_distinct_maximum.h"
@@ -40,9 +45,51 @@
     #pragma intrinsic(__cpuid)
 #else
     #include <x86intrin.h>
+    #include <cpuid.h>
 #endif
 
 constexpr int32_t INT32_SENTINEL = std::numeric_limits<int32_t>::max();
+
+// Select an external baseline (see include/engine/external/) instead of the generic robust
+// engine. Both are valid only for the SumInt32 point-modification problem.
+constexpr std::string_view FENWICK_IMPLEMENTATION_NAME = "fenwick";
+constexpr std::string_view ALGORITHMICA_IMPLEMENTATION_NAME = "algorithmica";
+
+// Two ways to time the replay.
+//   PerOperation brackets every operation in RDTSC fences, giving per-operation TSC histograms —
+//     the percentiles and the modification-vs-query split. The fence (LFENCE + RDTSCP) is a
+//     serializing barrier, so it adds a fixed overhead and prevents overlap between operations.
+//     Right when operations are individually expensive (the overhead is then negligible) or when
+//     the per-operation distribution is what you care about.
+//   Average drops the per-operation instrumentation entirely and only times whole batches with the
+//     wall clock, dividing the total by the operation count. No fences, no per-op overhead, so it
+//     measures genuine throughput — but it cannot produce the TSC split. Right when operations are
+//     cheap enough that the fence overhead would dominate (e.g. against SOTA prefix-sum structures).
+enum class EMeasurementMode {
+    PerOperation,
+    Average,
+};
+
+constexpr std::string_view PER_OPERATION_MODE_NAME = "per-operation";
+constexpr std::string_view AVERAGE_MODE_NAME = "average";
+
+std::string_view MeasurementModeName(const EMeasurementMode mode) {
+    switch (mode) {
+        case EMeasurementMode::PerOperation: return PER_OPERATION_MODE_NAME;
+        case EMeasurementMode::Average: return AVERAGE_MODE_NAME;
+    }
+    return "unknown";
+}
+
+std::optional<EMeasurementMode> MeasurementModeFromString(const std::string_view s) {
+    if (s == PER_OPERATION_MODE_NAME) {
+        return EMeasurementMode::PerOperation;
+    }
+    if (s == AVERAGE_MODE_NAME) {
+        return EMeasurementMode::Average;
+    }
+    return std::nullopt;
+}
 
 const double WARMUP_DATASET_SHARE = 0.05;
 const size_t QUERY_BATCH_SIZE = 100;
@@ -123,6 +170,7 @@ constexpr std::string_view DEFAULT_CSV_FILE = "benchmark_results.csv";
 struct TCsvContext {
     std::optional<std::string> Label;
     std::string CsvFile = std::string(DEFAULT_CSV_FILE);
+    std::string CpuModel = "unknown";
     std::string Implementation = "robust";
     std::string DatasetType;
     std::string GeneratorType;
@@ -130,6 +178,7 @@ struct TCsvContext {
     std::string NodeTopology;
     size_t LeafSizeLog = 0;
     bool WithSentinel = false;
+    EMeasurementMode MeasurementMode = EMeasurementMode::PerOperation;
 };
 
 struct TRunMetrics {
@@ -199,6 +248,8 @@ void AppendCsvResult(const TCsvContext& context, const size_t length, const size
 
     std::vector<std::pair<std::string, std::string>> columns;
     columns.emplace_back("label", context.Label.value_or(""));
+    columns.emplace_back("cpu_model", context.CpuModel);
+    columns.emplace_back("measurement_mode", std::string(MeasurementModeName(context.MeasurementMode)));
     columns.emplace_back("implementation", context.Implementation);
     columns.emplace_back("dataset_type", context.DatasetType);
     columns.emplace_back("generator_type", context.GeneratorType);
@@ -308,6 +359,57 @@ int64_t GetPeakMemoryUsageKB() {
 #endif
 }
 
+// Reads the processor brand string via the CPUID extended leaves 0x80000002..0x80000004,
+// the canonical way to obtain a human-readable CPU model on x86. Returns "unknown" when the
+// leaves are unavailable (e.g. on a non-x86 host).
+std::string GetCpuBrandString() {
+    uint32_t regs[12] = {0};  // three leaves, four 32-bit registers each
+#if defined(_MSC_VER)
+    int cpuInfo[4];
+    __cpuid(cpuInfo, 0x80000000);
+    if (static_cast<uint32_t>(cpuInfo[0]) < 0x80000004) {
+        return "unknown";
+    }
+    for (uint32_t leaf = 0; leaf < 3; ++leaf) {
+        __cpuid(cpuInfo, 0x80000002 + leaf);
+        for (uint32_t reg = 0; reg < 4; ++reg) {
+            regs[leaf * 4 + reg] = static_cast<uint32_t>(cpuInfo[reg]);
+        }
+    }
+#elif defined(__i386__) || defined(__x86_64__)
+    uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+    if (__get_cpuid(0x80000000, &eax, &ebx, &ecx, &edx) == 0 || eax < 0x80000004) {
+        return "unknown";
+    }
+    for (uint32_t leaf = 0; leaf < 3; ++leaf) {
+        __get_cpuid(0x80000002 + leaf, &regs[leaf * 4], &regs[leaf * 4 + 1], &regs[leaf * 4 + 2], &regs[leaf * 4 + 3]);
+    }
+#else
+    return "unknown";
+#endif
+
+    char brand[49];
+    std::memcpy(brand, regs, sizeof(regs));
+    brand[sizeof(regs)] = '\0';
+
+    // The brand string is space-padded; trim the surrounding whitespace for cleaner logs.
+    std::string result(brand);
+    const auto first = result.find_first_not_of(" \t");
+    const auto last = result.find_last_not_of(" \t");
+    if (first == std::string::npos) {
+        return "unknown";
+    }
+    return result.substr(first, last - first + 1);
+}
+
+// Logs the CPU model and a few basic facts about the host so that a benchmark log is
+// self-contained: the numbers below only make sense against the processor that produced them.
+void LogProcessorInfo(int32_t pinnedCore) {
+    spdlog::info("CPU model: {}", GetCpuBrandString());
+    spdlog::info("Logical cores: {}", std::thread::hardware_concurrency());
+    spdlog::info("Execution pinned to core: {}", pinnedCore);
+}
+
 template<class TValue, class TOperationResult, class TOperation, auto Sentinel = std::nullopt>
 void RunDatasetWithSettings(
     NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer,
@@ -375,35 +477,21 @@ void RunWithDispatchedTopology(
     }
 }
 
-template<class TValue, class TOperationResult, class TOperation, NProust::DataLayout<TValue, TOperationResult> TDataLayout, NProust::NodeTopology TNodeTopology, size_t LeafSizeLog>
-void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer, NProust::EBaseGeneratorType baseGeneratorType, const TCsvContext& csvContext) {
+// The timed replay loop, templated on the *concrete* engine type so SetPoint / SetRange /
+// ComputeRange are direct, inlinable calls rather than virtual dispatch through
+// IPointUpdateEngine / IRangeUpdateEngine. Kind selects the modification method at compile time;
+// Mode selects per-operation RDTSC instrumentation versus batch-only wall-clock timing — both
+// resolved with `if constexpr`, so the unused path leaves no trace in the hot loop.
+template<NProust::EBaseGeneratorType Kind, EMeasurementMode Mode, class TEngine, class TValue, class TOperationResult>
+void RunBenchmarkLoop(
+    NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer,
+    TEngine& engine,
+    const TCsvContext& csvContext
+) {
+    constexpr bool PerOp = (Mode == EMeasurementMode::PerOperation);
     std::vector<TWeightedDurations> weightedDurations;
     std::vector<size_t> cyclesSetValue(MAX_CYCLES_PER_OPERATION, 0);
     std::vector<size_t> cyclesComputeRange(MAX_CYCLES_PER_OPERATION, 0);
-
-    std::unique_ptr<NProust::IRangeUpdateEngine<TValue, TOperationResult, TOperation>> rangeUpdateEngine;
-    std::unique_ptr<NProust::IPointUpdateEngine<TValue, TOperationResult, TOperation>> pointUpdateEngine;
-    {
-        const auto initStartedAt = std::chrono::high_resolution_clock::now();
-        switch (baseGeneratorType) {
-            case (NProust::EBaseGeneratorType::Point): {
-                spdlog::info("Using a point-update engine");
-                pointUpdateEngine = NProust::CreateRobustPointUpdateEngine<TValue, TOperationResult, TOperation, LeafSizeLog>();
-                pointUpdateEngine->Init(streamer.GetLength());
-                break;
-            }
-            case (NProust::EBaseGeneratorType::Range): {
-                spdlog::info("Using a range-update engine");
-                rangeUpdateEngine = NProust::CreateRobustRangeUpdateEngine<TValue, TOperationResult, TOperation, TNodeTopology, TDataLayout>();
-                rangeUpdateEngine->Init(streamer.GetLength());
-                break;
-            }
-        }
-
-        const auto initDoneAt = std::chrono::high_resolution_clock::now();
-        const auto initDuration = std::chrono::duration_cast<std::chrono::milliseconds>(initDoneAt - initStartedAt).count();
-        spdlog::info("Structure initialization done in {} ms", initDuration);
-    }    
 
     size_t readCount = 0;
     std::chrono::nanoseconds runTimeElapsed(0);
@@ -441,49 +529,44 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
 
         // We write into preallocated buffers because it's faster than random jumps over the histogram vectors
         // Therefore we remove a bit of non-related noise from the measurement
-        // The data from the buffers is added into histograms outside of the timed section
+        // The data from the buffers is added into histograms outside of the timed section.
+        // In Average mode the per-operation cycle buffers are never touched.
         std::vector<uint64_t> batchSetValueCycles;
         std::vector<uint64_t> batchComputeValueCycles;
-        batchSetValueCycles.reserve(datasetChunk.size());
-        batchComputeValueCycles.reserve(datasetChunk.size());
+        if constexpr (PerOp) {
+            batchSetValueCycles.reserve(datasetChunk.size());
+            batchComputeValueCycles.reserve(datasetChunk.size());
+        }
 
         const auto batchRunStartedAt = std::chrono::high_resolution_clock::now();
         for (const auto& planItem : datasetChunk) {
             switch (planItem.Operation) {
                 case NProust::EEngineOperation::SetRange: {
-                    switch (baseGeneratorType) {
-                        case (NProust::EBaseGeneratorType::Point): {
-                            startCycle = StartRDTSC();
-                            pointUpdateEngine->SetPoint(planItem.Left, *planItem.Value);
-                            endCycle = EndRDTSC();
-                            break;
-                        }
-                        case (NProust::EBaseGeneratorType::Range): {
-                            startCycle = StartRDTSC();
-                            rangeUpdateEngine->SetRange(planItem.Left, planItem.Right, *planItem.Value);
-                            endCycle = EndRDTSC();
-                            break;
-                        }
+                    // The RDTSC fences exist only in PerOp mode; in Average mode the modification
+                    // runs bare, so adjacent operations can overlap.
+                    if constexpr (PerOp) {
+                        startCycle = StartRDTSC();
                     }
-                    batchSetValueCycles.push_back(endCycle - startCycle);
+                    if constexpr (Kind == NProust::EBaseGeneratorType::Point) {
+                        engine.SetPoint(planItem.Left, *planItem.Value);
+                    } else {
+                        engine.SetRange(planItem.Left, planItem.Right, *planItem.Value);
+                    }
+                    if constexpr (PerOp) {
+                        endCycle = EndRDTSC();
+                        batchSetValueCycles.push_back(endCycle - startCycle);
+                    }
                     break;
                 }
                 case NProust::EEngineOperation::Query: {
-                    switch (baseGeneratorType) {
-                        case (NProust::EBaseGeneratorType::Point): {
-                            startCycle = StartRDTSC();
-                            result = pointUpdateEngine->ComputeRange(planItem.Left, planItem.Right);
-                            endCycle = EndRDTSC();
-                            break;
-                        }
-                        case (NProust::EBaseGeneratorType::Range): {
-                            startCycle = StartRDTSC();
-                            result = rangeUpdateEngine->ComputeRange(planItem.Left, planItem.Right);
-                            endCycle = EndRDTSC();
-                            break;
-                        }
+                    if constexpr (PerOp) {
+                        startCycle = StartRDTSC();
                     }
-                    batchComputeValueCycles.push_back(endCycle - startCycle);
+                    result = engine.ComputeRange(planItem.Left, planItem.Right);
+                    if constexpr (PerOp) {
+                        endCycle = EndRDTSC();
+                        batchComputeValueCycles.push_back(endCycle - startCycle);
+                    }
                     if (result != *planItem.ExpectedResult) {
                         spdlog::critical("The implementation is incorrect: the benchmark doesn't make sense.");
                         std::terminate();
@@ -498,11 +581,13 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
 
         if (warmupIsDone) {
             weightedDurations.emplace_back((uint32_t)datasetChunk.size(), (uint32_t)avgPerQueryInBatch);
-            for (const auto element : batchSetValueCycles) {
-                ++cyclesSetValue[std::min(element, MAX_CYCLES_PER_OPERATION - 1)];
-            }
-            for (const auto element : batchComputeValueCycles) {
-                ++cyclesComputeRange[std::min(element, MAX_CYCLES_PER_OPERATION - 1)];
+            if constexpr (PerOp) {
+                for (const auto element : batchSetValueCycles) {
+                    ++cyclesSetValue[std::min(element, MAX_CYCLES_PER_OPERATION - 1)];
+                }
+                for (const auto element : batchComputeValueCycles) {
+                    ++cyclesComputeRange[std::min(element, MAX_CYCLES_PER_OPERATION - 1)];
+                }
             }
             runTimeElapsed += batchTimeElapsed;
         }
@@ -522,13 +607,19 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
     for (const auto& percentile : TARGET_PERCENTILES) {
         metrics.WallPercentiles.push_back(CalculatePercentile(weightedDurations, percentile.Numerator, percentile.Denominator));
     }
+    // The TSC split exists only in PerOp mode; Average mode never measured individual operations,
+    // so those columns are reported as zero to keep the CSV schema and the percentile count stable.
     for (const auto& percentile : TARGET_PERCENTILES) {
-        metrics.ModifyPercentiles.push_back(CalculatePercentile(cyclesSetValue, percentile.Numerator, percentile.Denominator));
-    }
-    for (const auto& percentile : TARGET_PERCENTILES) {
-        metrics.QueryPercentiles.push_back(CalculatePercentile(cyclesComputeRange, percentile.Numerator, percentile.Denominator));
+        if constexpr (PerOp) {
+            metrics.ModifyPercentiles.push_back(CalculatePercentile(cyclesSetValue, percentile.Numerator, percentile.Denominator));
+            metrics.QueryPercentiles.push_back(CalculatePercentile(cyclesComputeRange, percentile.Numerator, percentile.Denominator));
+        } else {
+            metrics.ModifyPercentiles.push_back(0);
+            metrics.QueryPercentiles.push_back(0);
+        }
     }
 
+    spdlog::info("Measurement mode: {}", MeasurementModeName(Mode));
     spdlog::info("Peak memory usage: {} Kb", metrics.PeakMemoryKb);
     for (size_t i = 0; i < TARGET_PERCENTILES.size(); ++i) {
         spdlog::info("Approximate percentile [{}]: {} ns", TARGET_PERCENTILES[i].Name, metrics.WallPercentiles[i]);
@@ -551,11 +642,16 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
     //
     // So, you need to be aware of your CPU architecture to correctly interpret the results. Use the
     // TSC cycles as a kind of an abstract time/performance units.
-    for (size_t i = 0; i < TARGET_PERCENTILES.size(); ++i) {
-        spdlog::info("Modification percentile [{}]: {} TSC cycles", TARGET_PERCENTILES[i].Name, metrics.ModifyPercentiles[i]);
-    }
-    for (size_t i = 0; i < TARGET_PERCENTILES.size(); ++i) {
-        spdlog::info("Query percentile [{}]: {} TSC cycles", TARGET_PERCENTILES[i].Name, metrics.QueryPercentiles[i]);
+    //
+    // Only PerOp mode measures this; Average mode deliberately trades the split away to avoid the
+    // per-operation fence overhead, so there is nothing to print here.
+    if constexpr (PerOp) {
+        for (size_t i = 0; i < TARGET_PERCENTILES.size(); ++i) {
+            spdlog::info("Modification percentile [{}]: {} TSC cycles", TARGET_PERCENTILES[i].Name, metrics.ModifyPercentiles[i]);
+        }
+        for (size_t i = 0; i < TARGET_PERCENTILES.size(); ++i) {
+            spdlog::info("Query percentile [{}]: {} TSC cycles", TARGET_PERCENTILES[i].Name, metrics.QueryPercentiles[i]);
+        }
     }
 
     // The CSV row is written only when a label was supplied; otherwise the run is
@@ -566,11 +662,79 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
     }
 }
 
+// Initializes a freshly-built concrete engine, logs the init time, and runs the timed loop on it.
+template<NProust::EBaseGeneratorType Kind, class TEngine, class TValue, class TOperationResult>
+void InitAndRunLoop(
+    std::unique_ptr<TEngine> engine,
+    NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer,
+    const TCsvContext& csvContext,
+    std::chrono::high_resolution_clock::time_point initStartedAt
+) {
+    engine->Init(streamer.GetLength());
+    const auto initDoneAt = std::chrono::high_resolution_clock::now();
+    const auto initDuration = std::chrono::duration_cast<std::chrono::milliseconds>(initDoneAt - initStartedAt).count();
+    spdlog::info("Structure initialization done in {} ms", initDuration);
+    // Turn the runtime measurement mode into the compile-time template argument the loop wants.
+    switch (csvContext.MeasurementMode) {
+        case EMeasurementMode::PerOperation:
+            RunBenchmarkLoop<Kind, EMeasurementMode::PerOperation>(streamer, *engine, csvContext);
+            break;
+        case EMeasurementMode::Average:
+            RunBenchmarkLoop<Kind, EMeasurementMode::Average>(streamer, *engine, csvContext);
+            break;
+    }
+}
+
+// Picks the concrete engine for this run and hands it to the loop. The engine is held by its
+// concrete type the whole way down — never as an IPointUpdateEngine / IRangeUpdateEngine pointer —
+// so the hot-path calls in RunBenchmarkLoop devirtualize. The external baselines stay guarded to
+// the SumInt32 point problem, exactly as before.
+template<class TValue, class TOperationResult, class TOperation, NProust::DataLayout<TValue, TOperationResult> TDataLayout, NProust::NodeTopology TNodeTopology, size_t LeafSizeLog>
+void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer, NProust::EBaseGeneratorType baseGeneratorType, const TCsvContext& csvContext) {
+    const auto initStartedAt = std::chrono::high_resolution_clock::now();
+    switch (baseGeneratorType) {
+        case (NProust::EBaseGeneratorType::Point): {
+            if (csvContext.Implementation == FENWICK_IMPLEMENTATION_NAME || csvContext.Implementation == ALGORITHMICA_IMPLEMENTATION_NAME) {
+                if constexpr (std::is_same_v<TValue, int32_t> && std::is_same_v<TOperationResult, int32_t> && std::is_same_v<TOperation, NProust::TSumOperation>) {
+                    if (csvContext.Implementation == FENWICK_IMPLEMENTATION_NAME) {
+                        spdlog::info("Using the external Fenwick point-sum engine");
+                        InitAndRunLoop<NProust::EBaseGeneratorType::Point>(std::make_unique<NProust::TFenwickPointSumEngine<>>(), streamer, csvContext, initStartedAt);
+                    } else {
+                        spdlog::info("Using the external Algorithmica wide-segment-tree point-sum engine");
+                        InitAndRunLoop<NProust::EBaseGeneratorType::Point>(std::make_unique<NProust::TAlgorithmicaWideSegmentSumEngine<>>(), streamer, csvContext, initStartedAt);
+                    }
+                } else {
+                    spdlog::critical("The external engines only support the SumInt32 point problem");
+                    std::terminate();
+                }
+            } else {
+                spdlog::info("Using a point-update engine");
+                if constexpr (NProust::HasUndo<TOperation, TOperationResult>) {
+                    InitAndRunLoop<NProust::EBaseGeneratorType::Point>(std::make_unique<NProust::TFatPointUpdateEngine<TValue, TOperationResult, TOperation, 4>>(), streamer, csvContext, initStartedAt);
+                } else {
+                    InitAndRunLoop<NProust::EBaseGeneratorType::Point>(std::make_unique<NProust::TRobustPointUpdateEngine<TValue, TOperationResult, TOperation, LeafSizeLog>>(), streamer, csvContext, initStartedAt);
+                }
+            }
+            break;
+        }
+        case (NProust::EBaseGeneratorType::Range): {
+            spdlog::info("Using a range-update engine");
+            InitAndRunLoop<NProust::EBaseGeneratorType::Range>(std::make_unique<NProust::TRobustRangeUpdateEngine<TValue, TOperationResult, TOperation, TNodeTopology, TDataLayout>>(), streamer, csvContext, initStartedAt);
+            break;
+        }
+    }
+}
+
 int main(int argc, char* argv[]) {
     // The pin is needed for TSC usage that goes next, and also to reduce the number of
     // process migrations between cores, which would be harmful, for example, because of the
     // cold cache.
-    PinExecutionThread(0);
+    constexpr int32_t PINNED_CORE = 0;
+    PinExecutionThread(PINNED_CORE);
+
+    // Record what hardware produced the numbers; latency/TSC figures are only meaningful
+    // when interpreted against the specific processor that generated them.
+    LogProcessorInfo(PINNED_CORE);
 
     static_assert(std::chrono::high_resolution_clock::period::den, "High resolution clock doesn't have a nanosecond precision");
 
@@ -586,6 +750,7 @@ int main(int argc, char* argv[]) {
     std::optional<std::string> csvFn;
     std::optional<std::string> csvLabel;
     std::optional<std::string> implementation;
+    std::optional<std::string> measurementMode;
 
     for (auto it = args.begin() + 1; it != args.end(); ++it) {
         std::string_view arg = *it;
@@ -609,6 +774,8 @@ int main(int argc, char* argv[]) {
             ParseStringArgument(it, args.end(), csvLabel);
         } else if (arg == IMPLEMENTATION_PARAM) {
             ParseStringArgument(it, args.end(), implementation);
+        } else if (arg == MEASUREMENT_MODE_PARAM) {
+            ParseStringArgument(it, args.end(), measurementMode);
         } else {
             spdlog::critical("Unknown argument: {}", arg);
             std::terminate();
@@ -627,6 +794,7 @@ int main(int argc, char* argv[]) {
     TCsvContext csvContext;
     csvContext.Label = csvLabel;
     csvContext.CsvFile = csvFn.value_or(std::string(DEFAULT_CSV_FILE));
+    csvContext.CpuModel = GetCpuBrandString();
     csvContext.Implementation = implementation.value_or("robust");
     csvContext.DatasetType = std::string(DatasetTypeName(*datasetType));
     csvContext.GeneratorType = std::string(BaseGeneratorTypeName(*baseGeneratorType));
@@ -634,6 +802,14 @@ int main(int argc, char* argv[]) {
     csvContext.NodeTopology = std::string(NodeTopologyName(*nodeTopology));
     csvContext.LeafSizeLog = *leafSizeLog;
     csvContext.WithSentinel = withSentinel;
+    if (measurementMode.has_value()) {
+        const auto parsedMode = MeasurementModeFromString(*measurementMode);
+        if (!parsedMode.has_value()) {
+            spdlog::critical("Unknown measurement mode: {}. Expected '{}' or '{}'.", *measurementMode, PER_OPERATION_MODE_NAME, AVERAGE_MODE_NAME);
+            std::terminate();
+        }
+        csvContext.MeasurementMode = *parsedMode;
+    }
 
     switch (*datasetType) {
         case NProust::EDatasetType::SumInt32: {

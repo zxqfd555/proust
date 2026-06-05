@@ -19,7 +19,7 @@ namespace NProust {
         typename TLayout = TSoALayout<TValue, TOperationResult, std::nullopt>
     >
     requires DataLayout<TLayout, TValue, TOperationResult>
-    class TRobustRangeUpdateEngine: public IRangeUpdateEngine<TValue, TOperationResult, TOperation> {
+    class TRobustRangeUpdateEngine final : public IRangeUpdateEngine<TValue, TOperationResult, TOperation> {
     private:
         const size_t ROOT_NODE_ID = 0;
 
@@ -210,7 +210,7 @@ namespace NProust {
 
     template<typename TValue, typename TOperationResult, typename TOperation, size_t BranchingLog = 1>
     requires ValidOperation<TOperation, TValue, TOperationResult> && HasUndo<TOperation, TOperationResult>
-    class TFatPointUpdateEngine: public IPointUpdateEngine<TValue, TOperationResult, TOperation> {
+    class TFatPointUpdateEngine final : public IPointUpdateEngine<TValue, TOperationResult, TOperation> {
     private:
         static constexpr size_t ROOT_NODE_ID = 1;
         static constexpr size_t CHILDREN_COUNT = 1 << BranchingLog;
@@ -339,7 +339,7 @@ namespace NProust {
     };
 
     template<typename TValue, typename TOperationResult, typename TOperation, size_t LeafSizeLog = 1>
-    class TRobustPointUpdateEngine: public IPointUpdateEngine<TValue, TOperationResult, TOperation> {
+    class TRobustPointUpdateEngine final : public IPointUpdateEngine<TValue, TOperationResult, TOperation> {
     private:
         // We use 1-indexing here: although not as nice, it allows us a bit cheaper topology operations
         // as compared to 0-indexing.
