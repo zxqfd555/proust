@@ -354,50 +354,53 @@ namespace NProust {
                 AllocatedLength = LEAF_SIZE;
             }
 
-            // Being a power of two, the tree takes 2x nodes from the length
-            NodeValues.resize(AllocatedLength << 1);
+            // One leaf-group node per LEAF_SIZE elements. Like the fat engine, we materialize only
+            // the leaf-group tree (GroupCount leaves + their ancestors = 2*GroupCount nodes) of
+            // TOperationResult, and keep the raw values in a separate TValue array. A leaf's own
+            // result is never stored: it is rebuilt from PointValues on demand (FromMany, or a
+            // per-element FromRepeated fold). For LeafSizeLog == 0 this degenerates to the classic
+            // 2*AllocatedLength per-element tree.
+            GroupCount = AllocatedLength >> LeafSizeLog;
+            NodeValues.resize(GroupCount << 1);
 
-            // The raw point values are kept alongside the tree so the FromMany fast path
-            // can rebuild a leaf's result from the original values (not from merged results).
             PointValues.resize(AllocatedLength);
             std::fill(PointValues.begin(), PointValues.end(), TValue());
 
-            // Initialize the tree with the default values starting from the leafs
-            const auto leafValue = TOperation::template FromRepeated<TValue, TOperationResult>(TValue(), 1);
-            std::fill(NodeValues.begin(), NodeValues.end(), leafValue);
-            for (size_t index = AllocatedLength - 1; index >= 1; --index) {
+            // Initialize the leaf-group nodes with the state of LEAF_SIZE default values, then build
+            // the tree above them.
+            const auto defaultLeaf = TOperation::template FromRepeated<TValue, TOperationResult>(TValue(), LEAF_SIZE);
+            std::fill(NodeValues.begin() + GroupCount, NodeValues.end(), defaultLeaf);
+            for (size_t index = GroupCount - 1; index >= 1; --index) {
                 NodeValues[index] = TOperation::Merge(NodeValues[(index << 1)], NodeValues[(index << 1) + 1]);
             }
         }
 
         virtual void SetPoint(const size_t position, const TValue& value) override {
             assert(position < AllocatedLength && "The position is beyond the allocated size");
-            size_t nodePosition = AllocatedLength + position;
 
-            // Keep the raw value current before any leaf rebuild: the FromMany path in
-            // ComputeRangeBruteForce reads PointValues, so it must already reflect this update.
+            // Capture the old raw value before overwriting: the Undo fast path folds it back out.
+            // The FromMany leaf rebuild reads PointValues, so it must already reflect this update.
+            [[maybe_unused]] const TValue oldValue = PointValues[position];
             PointValues[position] = value;
 
-            const size_t largeLeafStart = position & ~(LEAF_SIZE - 1);
+            size_t node = GroupCount + (position >> LeafSizeLog);
 
-            if constexpr (HasUndo<TOperation, TOperationResult>) {
-                const auto oldValue = NodeValues[nodePosition];
-                NodeValues[nodePosition] = TOperation::template FromRepeated<TValue, TOperationResult>(value, 1);
-                if constexpr (LeafSizeLog > 0) {
-                    nodePosition >>= LeafSizeLog;
-                    const auto oldValueUndone = TOperation::Undo(NodeValues[nodePosition], oldValue);
-                    NodeValues[nodePosition] = TOperation::Merge(oldValueUndone, TOperation::template FromRepeated<TValue, TOperationResult>(value, 1));
-                }
+            if constexpr (LeafSizeLog == 0) {
+                // The leaf-group is a single element; just overwrite its result.
+                NodeValues[node] = TOperation::template FromRepeated<TValue, TOperationResult>(value, 1);
+            } else if constexpr (HasUndo<TOperation, TOperationResult>) {
+                // Fold the old element out of the group and the new one in, in O(1).
+                const auto undone = TOperation::Undo(NodeValues[node], TOperation::template FromRepeated<TValue, TOperationResult>(oldValue, 1));
+                NodeValues[node] = TOperation::Merge(undone, TOperation::template FromRepeated<TValue, TOperationResult>(value, 1));
             } else {
-                NodeValues[nodePosition] = TOperation::template FromRepeated<TValue, TOperationResult>(value, 1);
-                if constexpr (LeafSizeLog > 0) {
-                    NodeValues[nodePosition >>= LeafSizeLog] = ComputeRangeBruteForce(largeLeafStart, largeLeafStart + LEAF_SIZE);
-                }
+                // No inverse: rebuild the leaf-group's result from its LEAF_SIZE raw values.
+                const size_t leafStart = position & ~(LEAF_SIZE - 1);
+                NodeValues[node] = ComputeRangeBruteForce(leafStart, leafStart + LEAF_SIZE);
             }
 
-            while (nodePosition > 1) {
-                NodeValues[nodePosition >> 1] = TOperation::Merge(NodeValues[nodePosition & ~1], NodeValues[nodePosition | 1]);
-                nodePosition >>= 1;
+            while (node > 1) {
+                NodeValues[node >> 1] = TOperation::Merge(NodeValues[node & ~1], NodeValues[node | 1]);
+                node >>= 1;
             }
         }
 
@@ -446,15 +449,17 @@ namespace NProust {
         std::vector<TOperationResult> NodeValues;
         std::vector<TValue> PointValues;
         size_t AllocatedLength;
+        size_t GroupCount;  // = AllocatedLength >> LeafSizeLog; number of leaf-group nodes
 
         inline TOperationResult ComputeRangeBruteForce(const size_t rangeStart, const size_t rangeEnd) const {
             assert(rangeStart < rangeEnd);
             if constexpr (HasFromMany<TOperation, TValue, TOperationResult>) {
                 return TOperation::template FromMany<TOperationResult>(PointValues.data(), rangeStart, rangeEnd);
             } else {
-                auto result = NodeValues[AllocatedLength + rangeStart];
-                for (size_t index = AllocatedLength + rangeStart + 1; index < AllocatedLength + rangeEnd; ++index) {
-                    result = TOperation::Merge(result, NodeValues[index]);
+                // Per-element leaf results are no longer stored, so rebuild from the raw values.
+                auto result = TOperation::template FromRepeated<TValue, TOperationResult>(PointValues[rangeStart], 1);
+                for (size_t index = rangeStart + 1; index < rangeEnd; ++index) {
+                    result = TOperation::Merge(result, TOperation::template FromRepeated<TValue, TOperationResult>(PointValues[index], 1));
                 }
                 return result;
             }
@@ -466,7 +471,7 @@ namespace NProust {
                 return ComputeRangeBruteForce(0, prefix);
             }
 
-            const auto mainResult = ComputeRangeBackwards(AllocatedLength, alignedBorder);
+            const auto mainResult = ComputeRangeBackwards(GroupCount, alignedBorder >> LeafSizeLog);
             if constexpr (LeafSizeLog == 0) {
                 return mainResult;
             }
@@ -486,12 +491,11 @@ namespace NProust {
             // As a reward, there's a 4x speedup (even before SIMD and large leaf optimization) for being
             // efficient.
             //
-            // No matter the structure of the tree, we use a binary heap layout. We need to take
-            // any node starting at `rangeStart` coordinate, and we basically want to take the longest
-            // one, not exceeding the query range. At least the node indexed as `AllocatedLength + rangeStart`,
-            // an associate leaf, will do for us.
-            auto currentNode = AllocatedLength + rangeStart;
-            auto queryLength = rangeEnd - rangeStart;
+            // We use a binary heap layout over the leaf-group nodes. `rangeStart`/`rangeEnd` arrive
+            // leaf-aligned (multiples of LEAF_SIZE), so we convert them to group coordinates and
+            // walk the group heap: the leaf-group node for group g is at index GroupCount + g.
+            auto currentNode = GroupCount + (rangeStart >> LeafSizeLog);
+            auto queryLength = (rangeEnd - rangeStart) >> LeafSizeLog;
 
             // Due to heap topology, each node has a contiguous range of power-2 segments starting there,
             // the cardinality of this set is same as the number of zeros at the end of node representation.
