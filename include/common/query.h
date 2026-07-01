@@ -16,12 +16,13 @@ namespace NProust {
 
     class ITestPlanBaseGenerator {
     public:
-        ITestPlanBaseGenerator(const size_t length, const double pModification = 0.5)
+        ITestPlanBaseGenerator(const size_t length, const double pModification = 0.5, const size_t maxWidth = 0)
             : Length(length)
             , Rng(std::random_device{}())
             , IsModification(pModification)
             , RangeStartDist(0, length - 1)
             , RangeEndDist(0, length)
+            , MaxWidth(maxWidth)
         {
         }
 
@@ -34,6 +35,10 @@ namespace NProust {
         std::bernoulli_distribution IsModification;
         std::uniform_int_distribution<size_t> RangeStartDist;
         std::uniform_int_distribution<size_t> RangeEndDist;
+        // When non-zero, ranges are capped to at most MaxWidth elements: a localized,
+        // small-range workload (the realistic low-latency regime), as opposed to the
+        // default uniform [L, R) whose mean width is ~N/3.
+        const size_t MaxWidth;
 
         EEngineOperation NextOperation() {
             bool isModification = IsModification(Rng);
@@ -53,6 +58,14 @@ namespace NProust {
             auto right = RangeEndDist(Rng);
             if (left > right) {
                 std::swap(left, right);
+            }
+            if (MaxWidth != 0 && right - left > MaxWidth) {
+                // Anchor at `left` and clamp the width to the window.
+                std::uniform_int_distribution<size_t> widthDist(1, MaxWidth);
+                right = left + widthDist(Rng);
+                if (right > Length) {
+                    right = Length;
+                }
             }
             return std::make_pair(left, right);
         }

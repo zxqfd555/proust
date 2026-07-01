@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bit>
 #include <cassert>
 #include <vector>
 #include <optional>
@@ -15,7 +16,10 @@ namespace NProust {
         typename TValue,
         typename TOperationResult,
         typename TOperation,
-        NodeTopology TNodeTopology = TPreorderNodeTopology<0>,
+        // Heap topology keeps siblings adjacent (rightChild = leftChild + 1), so the merge-up on
+        // SetRange reads one cache line instead of a far-away one -- ~25% faster on the hot path
+        // than preorder (measured). This also matches the default of CreateRobustRangeUpdateEngine.
+        NodeTopology TNodeTopology = TBinaryHeapNodeTopology<0>,
         typename TLayout = TSoALayout<TValue, TOperationResult, std::nullopt>
     >
     requires DataLayout<TLayout, TValue, TOperationResult>
@@ -68,6 +72,57 @@ namespace NProust {
             }
         }
 
+        // Out-of-line on purpose: see the call site in ModifyNodes. Rebuilds a (fat) leaf's subtree
+        // value after assigning `value` to [rangeStart, rangeEnd) within [nodeStart, nodeEnd).
+        [[gnu::noinline]] void ModifyLeaf(const size_t nodeId, const size_t rangeStart, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd, const TValue& value) {
+            const size_t segmentStart = std::max(rangeStart, nodeStart);
+            const size_t segmentEnd = std::min(rangeEnd, nodeEnd);
+            if (Nodes.HasLazilyPropagated(nodeId)) {
+                const auto lazilyPropagated = Nodes.GetLazilyPropagated(nodeId);
+                std::fill(LazySnapshot.begin() + nodeStart, LazySnapshot.begin() + segmentStart, lazilyPropagated);
+                std::fill(LazySnapshot.begin() + segmentStart, LazySnapshot.begin() + segmentEnd, value);
+                std::fill(LazySnapshot.begin() + segmentEnd, LazySnapshot.begin() + nodeEnd, lazilyPropagated);
+                Nodes.DropLazilyPropagated(nodeId);
+
+                const auto segmentValue = TOperation::template FromRepeated<TValue, TOperationResult>(value, segmentEnd - segmentStart);
+
+                const auto toSegmentEnd =
+                    segmentStart == nodeStart ? segmentValue :
+                    TOperation::Merge(TOperation::template FromRepeated<TValue, TOperationResult>(lazilyPropagated, segmentStart - nodeStart), segmentValue);
+
+                auto nodeValue =
+                    segmentEnd == nodeEnd ? toSegmentEnd :
+                    TOperation::Merge(toSegmentEnd, TOperation::template FromRepeated<TValue, TOperationResult>(lazilyPropagated, nodeEnd - segmentEnd));
+
+                Nodes.SetSubtreeValue(nodeId, std::move(nodeValue));
+            } else {
+                std::fill(LazySnapshot.begin() + segmentStart, LazySnapshot.begin() + segmentEnd, value);
+
+                if constexpr (HasFromMany<TOperation, TValue, TOperationResult>) {
+                    // With no pending lazy tag, the snapshot now holds the leaf's full content
+                    // over [nodeStart, nodeEnd) (the [segmentStart, segmentEnd) slice was just
+                    // overwritten with `value`), so the subtree value is a single bulk build.
+                    Nodes.SetSubtreeValue(nodeId, TOperation::template FromMany<TOperationResult>(LazySnapshot.data(), nodeStart, nodeEnd));
+                } else {
+                    TOperationResult subtreeValue = TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[nodeStart], 1);
+                    if (segmentStart > nodeStart) {
+                        for (size_t index = nodeStart + 1; index < segmentStart; ++index) {
+                            subtreeValue = TOperation::Merge(subtreeValue, TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[index], 1));
+                        }
+                        subtreeValue = TOperation::Merge(subtreeValue, TOperation::template FromRepeated<TValue, TOperationResult>(value, segmentEnd - segmentStart));
+                    } else {
+                        subtreeValue = TOperation::template FromRepeated<TValue, TOperationResult>(value, segmentEnd - segmentStart);
+                    }
+
+                    for (size_t index = segmentEnd; index < nodeEnd; ++index) {
+                        subtreeValue = TOperation::Merge(subtreeValue, TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[index], 1));
+                    }
+
+                    Nodes.SetSubtreeValue(nodeId, std::move(subtreeValue));
+                }
+            }
+        }
+
         inline void ModifyNodes(const size_t nodeId, const size_t rangeStart, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd, const TValue& value) {
             if (rangeStart <= nodeStart && rangeEnd >= nodeEnd) {
                 Nodes.SetLazilyPropagated(nodeId, value);
@@ -76,52 +131,10 @@ namespace NProust {
             }
 
             if (TNodeTopology::IsLeaf(nodeEnd - nodeStart)) [[unlikely]] {
-                const size_t segmentStart = std::max(rangeStart, nodeStart);
-                const size_t segmentEnd = std::min(rangeEnd, nodeEnd);
-                if (Nodes.HasLazilyPropagated(nodeId)) {
-                    const auto lazilyPropagated = Nodes.GetLazilyPropagated(nodeId);
-                    std::fill(LazySnapshot.begin() + nodeStart, LazySnapshot.begin() + segmentStart, lazilyPropagated);
-                    std::fill(LazySnapshot.begin() + segmentStart, LazySnapshot.begin() + segmentEnd, value);
-                    std::fill(LazySnapshot.begin() + segmentEnd, LazySnapshot.begin() + nodeEnd, lazilyPropagated);
-                    Nodes.DropLazilyPropagated(nodeId);
-
-                    const auto segmentValue = TOperation::template FromRepeated<TValue, TOperationResult>(value, segmentEnd - segmentStart);
-
-                    const auto toSegmentEnd = 
-                        segmentStart == nodeStart ? segmentValue :
-                        TOperation::Merge(TOperation::template FromRepeated<TValue, TOperationResult>(lazilyPropagated, segmentStart - nodeStart), segmentValue);
-
-                    auto nodeValue =
-                        segmentEnd == nodeEnd ? toSegmentEnd :
-                        TOperation::Merge(toSegmentEnd, TOperation::template FromRepeated<TValue, TOperationResult>(lazilyPropagated, nodeEnd - segmentEnd));
-
-                    Nodes.SetSubtreeValue(nodeId, std::move(nodeValue));
-                } else {
-                    std::fill(LazySnapshot.begin() + segmentStart, LazySnapshot.begin() + segmentEnd, value);
-
-                    if constexpr (HasFromMany<TOperation, TValue, TOperationResult>) {
-                        // With no pending lazy tag, the snapshot now holds the leaf's full content
-                        // over [nodeStart, nodeEnd) (the [segmentStart, segmentEnd) slice was just
-                        // overwritten with `value`), so the subtree value is a single bulk build.
-                        Nodes.SetSubtreeValue(nodeId, TOperation::template FromMany<TOperationResult>(LazySnapshot.data(), nodeStart, nodeEnd));
-                    } else {
-                        TOperationResult subtreeValue = TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[nodeStart], 1);
-                        if (segmentStart > nodeStart) {
-                            for (size_t index = nodeStart + 1; index < segmentStart; ++index) {
-                                subtreeValue = TOperation::Merge(subtreeValue, TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[index], 1));
-                            }
-                            subtreeValue = TOperation::Merge(subtreeValue, TOperation::template FromRepeated<TValue, TOperationResult>(value, segmentEnd - segmentStart));
-                        } else {
-                            subtreeValue = TOperation::template FromRepeated<TValue, TOperationResult>(value, segmentEnd - segmentStart);
-                        }
-
-                        for (size_t index = segmentEnd; index < nodeEnd; ++index) {
-                            subtreeValue = TOperation::Merge(subtreeValue, TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[index], 1));
-                        }
-
-                        Nodes.SetSubtreeValue(nodeId, std::move(subtreeValue));
-                    }
-                }
+                // The leaf rebuild carries the (auto-vectorized) FromMany / Merge-fold kernel. Keeping
+                // it out of line means the recursive descent body stays free of AVX, so its prologue
+                // skips the 32-byte stack realignment and vzeroupper that the inlined kernel forces.
+                ModifyLeaf(nodeId, rangeStart, rangeEnd, nodeStart, nodeEnd, value);
             } else {
                 const size_t midpoint = (nodeStart + nodeEnd) >> 1;
                 const size_t leftChildId = TNodeTopology::LeftChild(nodeId, nodeEnd - nodeStart);
@@ -152,6 +165,19 @@ namespace NProust {
             }
         }
 
+        // Out-of-line leaf reduction for the query path (see the call site in QueryNodes).
+        [[gnu::noinline]] TOperationResult QueryLeaf(const size_t segmentStart, const size_t segmentEnd) const {
+            if constexpr (HasFromMany<TOperation, TValue, TOperationResult>) {
+                return TOperation::template FromMany<TOperationResult>(LazySnapshot.data(), segmentStart, segmentEnd);
+            } else {
+                TOperationResult result = TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[segmentStart], 1);
+                for (size_t index = segmentStart + 1; index < segmentEnd; ++index) {
+                    result = TOperation::Merge(result, TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[index], 1));
+                }
+                return result;
+            }
+        }
+
         inline TOperationResult QueryNodes(const size_t nodeId, const size_t rangeStart, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd) const {
             if (rangeStart <= nodeStart && rangeEnd >= nodeEnd) {
                 return Nodes.GetSubtreeValue(nodeId);
@@ -165,17 +191,9 @@ namespace NProust {
             }
 
             if (TNodeTopology::IsLeaf(nodeEnd - nodeStart)) {
-                const size_t segmentStart = std::max(rangeStart, nodeStart);
-                const size_t segmentEnd = std::min(rangeEnd, nodeEnd);
-                if constexpr (HasFromMany<TOperation, TValue, TOperationResult>) {
-                    return TOperation::template FromMany<TOperationResult>(LazySnapshot.data(), segmentStart, segmentEnd);
-                } else {
-                    TOperationResult result = TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[segmentStart], 1);
-                    for (size_t index = segmentStart + 1; index < segmentEnd; ++index) {
-                        result = TOperation::Merge(result, TOperation::template FromRepeated<TValue, TOperationResult>(LazySnapshot[index], 1));
-                    }
-                    return result;
-                }
+                // Out of line: keeps the AVX leaf reduction (and its stack realignment) out of the
+                // recursive descent. See ModifyLeaf for the same reasoning.
+                return QueryLeaf(std::max(rangeStart, nodeStart), std::min(rangeEnd, nodeEnd));
             } else {
                 const size_t midpoint = (nodeStart + nodeEnd) >> 1;
                 if (midpoint > rangeStart) {
@@ -270,6 +288,12 @@ namespace NProust {
             }
         }
 
+        // no-tree-vectorize is deliberate: the suffix loop below trips at most CHILDREN_COUNT - 1
+        // times, and auto-vectorizing such a short map loop only pays head/tail overhead (measured
+        // ~4% slower). The attribute keeps it the tight scalar pointer loop the bound below enables.
+#if defined(__GNUC__) && !defined(__clang__)
+        [[gnu::optimize("no-tree-vectorize")]]
+#endif
         virtual void SetPoint(const size_t position, const TValue& value) override {
             const auto delta = TOperation::Undo(
                 TOperation::template FromRepeated<TValue, TOperationResult>(value, 1),
@@ -277,10 +301,25 @@ namespace NProust {
             );
             PointValues[position] = value;
 
+            // Walk up to (but not through) the root: the root node has no right-siblings, so its
+            // suffix update is always empty, and the root's own value is never read by a query
+            // (ComputePrefixBackwards stops at `> ROOT_NODE_ID`). Stopping here also keeps the block
+            // index below from underflowing when currentNode would be the root.
             auto currentNode = BottomLayerStart + (position >> LeafSizeLog);
-            while (currentNode >= ROOT_NODE_ID) {
-                for (size_t index = currentNode + 1; (index & (CHILDREN_COUNT - 1)) != LEFTMOST_CHILD_INDEX; ++index) {
-                    NodeValues[index] = TOperation::Merge(NodeValues[index], delta);
+            while (currentNode > ROOT_NODE_ID) {
+                // Fold the delta into the suffix of `currentNode`'s sibling group.
+                const size_t groupStart = (currentNode - LEFTMOST_CHILD_INDEX) & ~(CHILDREN_COUNT - 1);
+                const size_t blockStart = groupStart + LEFTMOST_CHILD_INDEX;
+                if constexpr (HasApplyToMany<TOperation, TOperationResult>) {
+                    // Whole fixed-size block, vectorized (Algorithmica-style masked update).
+                    TOperation::template ApplyToMany<TOperationResult>(
+                        NodeValues.data() + blockStart, CHILDREN_COUNT, (currentNode + 1) - blockStart, delta);
+                } else {
+                    // Scalar fallback: a countable pointer loop (4 instr/iter) over the suffix.
+                    const size_t groupEnd = blockStart + CHILDREN_COUNT;
+                    for (size_t index = currentNode + 1; index < groupEnd; ++index) {
+                        NodeValues[index] = TOperation::Merge(NodeValues[index], delta);
+                    }
                 }
                 currentNode = (currentNode + INDEX_SHIFT_FOR_PARENT_CALCULATION) >> BranchingLog;
             }
@@ -500,21 +539,28 @@ namespace NProust {
             // Due to heap topology, each node has a contiguous range of power-2 segments starting there,
             // the cardinality of this set is same as the number of zeros at the end of node representation.
             // We refer to it in the code as `maxJump`.
-            size_t maxJump = currentNode - (currentNode & (currentNode - 1));
+            // maxJump is the lowest set bit of currentNode, always a power of two, so the index
+            // `currentNode / maxJump` is exactly `currentNode >> ctz(currentNode)` -- a shift, not the
+            // ~20-40 cycle hardware division the compiler otherwise emits (it cannot prove the divisor
+            // is a power of two at compile time). Same trick in ComputeRangeBackwards below.
+            size_t maxShift = std::countr_zero(currentNode);
+            size_t maxJump = size_t(1) << maxShift;
             if (maxJump <= queryLength) {
-                auto result = NodeValues[currentNode / maxJump];
+                auto result = NodeValues[currentNode >> maxShift];
                 queryLength -= maxJump;
                 currentNode += maxJump;
-                maxJump = currentNode - (currentNode & (currentNode - 1));
+                maxShift = std::countr_zero(currentNode);
+                maxJump = size_t(1) << maxShift;
 
                 // While maxJump is smaller than the queried range, the things are simple:
                 // we just take the largest node possible, reuse its result, and proceed.
                 // The query length decreases, and the leftmost matching node index increases.
                 while (maxJump <= queryLength) {
-                    result = TOperation::Merge(result, NodeValues[currentNode / maxJump]);
+                    result = TOperation::Merge(result, NodeValues[currentNode >> maxShift]);
                     queryLength -= maxJump;
                     currentNode += maxJump;
-                    maxJump = currentNode - (currentNode & (currentNode - 1));
+                    maxShift = std::countr_zero(currentNode);
+                    maxJump = size_t(1) << maxShift;
                 }
 
                 if (queryLength > 0) [[likely]] {
@@ -538,11 +584,15 @@ namespace NProust {
             size_t lastNode = currentNode + queryLength;
 
             // We pick the length of the last node that will participate in our greedy movement.
-            size_t lastStep = queryLength - (queryLength & (queryLength - 1));
+            // lastStep is the lowest set bit of queryLength (a power of two), so `prevNode / lastStep`
+            // is the shift `prevNode >> ctz(queryLength)` -- avoiding the hardware division (see
+            // ComputeAlignedRange).
+            size_t lastShift = std::countr_zero(queryLength);
+            size_t lastStep = size_t(1) << lastShift;
             size_t prevNode = lastNode - lastStep;
 
             // And use the result from that node.
-            auto result = NodeValues[prevNode / lastStep];
+            auto result = NodeValues[prevNode >> lastShift];
             lastNode = prevNode;
 
             // Basically subtract the length of the taken interval, but faster.
@@ -550,9 +600,10 @@ namespace NProust {
 
             // Repeat the process when needed.
             while (queryLength > 0) {
-                lastStep = queryLength - (queryLength & (queryLength - 1));
+                lastShift = std::countr_zero(queryLength);
+                lastStep = size_t(1) << lastShift;
                 prevNode = lastNode - lastStep;
-                result = TOperation::Merge(NodeValues[prevNode / lastStep], result);  // Note the unusual operand order: the operation is non-commutative!
+                result = TOperation::Merge(NodeValues[prevNode >> lastShift], result);  // Note the unusual operand order: the operation is non-commutative!
                 lastNode = prevNode;
                 queryLength &= queryLength - 1;
             }

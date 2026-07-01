@@ -73,6 +73,15 @@ TEST(PointUpdateEngine, IntSum) {
     TestPointUpdateEngineExhaustively<int64_t, int64_t, NProust::TSumOperation>(CreateRandomIntGenerator(-100, 100));
 }
 
+TEST(PointUpdateEngine, Int16Sum) {
+    // 16-bit width exercises the vpaddw path of ApplyToMany; sums wrap mod 2^16 in both engines.
+    TestPointUpdateEngineExhaustively<int16_t, int16_t, NProust::TSumOperation>(CreateRandomIntGenerator<int16_t>(-30000, 30000));
+}
+
+TEST(PointUpdateEngine, Int16Xor) {
+    TestPointUpdateEngineExhaustively<int16_t, int16_t, NProust::TBitwiseXorOperation>(CreateRandomIntGenerator<int16_t>(-30000, 30000));
+}
+
 TEST(PointUpdateEngine, IntBitwiseAnd) {
     TestPointUpdateEngineExhaustively<int64_t, int64_t, NProust::TBitwiseAndOperation>(CreateRandomIntGenerator(0, 65536));
 }
@@ -91,6 +100,12 @@ TEST(PointUpdateEngine, IntMin) {
 
 TEST(PointUpdateEngine, IntMax) {
     TestPointUpdateEngineExhaustively<int64_t, int64_t, NProust::TMaxOperation>(CreateRandomIntGenerator(-100, 100));
+}
+
+TEST(PointUpdateEngine, IntGcd) {
+    // Positive values keep a single element's result (itself) consistent with std::gcd's
+    // non-negative convention over a range.
+    TestPointUpdateEngineExhaustively<int64_t, int64_t, NProust::TGcdOperation>(CreateRandomIntGenerator<int64_t>(1, 1'000'000));
 }
 
 TEST(PointUpdateEngine, LeetcodeMaximumSubarrayExample) {

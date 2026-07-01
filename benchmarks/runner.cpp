@@ -195,6 +195,16 @@ std::string_view DatasetTypeName(const NProust::EDatasetType type) {
         case NProust::EDatasetType::MaxInt32: return "MaxInt32";
         case NProust::EDatasetType::MaxSumInt32: return "MaxSumInt32";
         case NProust::EDatasetType::OrderStatistic16: return "OrderStatistic16";
+        case NProust::EDatasetType::SumDouble: return "SumDouble";
+        case NProust::EDatasetType::MaxDouble: return "MaxDouble";
+        case NProust::EDatasetType::XorInt32: return "XorInt32";
+        case NProust::EDatasetType::GcdInt32: return "GcdInt32";
+        case NProust::EDatasetType::AndInt32: return "AndInt32";
+        case NProust::EDatasetType::OrInt32: return "OrInt32";
+        case NProust::EDatasetType::SumInt16: return "SumInt16";
+        case NProust::EDatasetType::SumInt64: return "SumInt64";
+        case NProust::EDatasetType::XorInt16: return "XorInt16";
+        case NProust::EDatasetType::XorInt64: return "XorInt64";
     }
     return "unknown";
 }
@@ -703,8 +713,16 @@ void RunDataset(NProust::TStreamingDatasetReader<TValue, TOperationResult>& stre
                         spdlog::info("Using the external Algorithmica wide-segment-tree point-sum engine");
                         InitAndRunLoop<NProust::EBaseGeneratorType::Point>(std::make_unique<NProust::TAlgorithmicaWideSegmentSumEngine<>>(), streamer, csvContext, initStartedAt);
                     }
+                } else if constexpr (std::is_same_v<TValue, int32_t> && std::is_same_v<TOperationResult, int32_t> && std::is_same_v<TOperation, NProust::TBitwiseXorOperation>) {
+                    if (csvContext.Implementation == ALGORITHMICA_IMPLEMENTATION_NAME) {
+                        spdlog::info("Using the external Algorithmica wide-segment-tree point-XOR engine");
+                        InitAndRunLoop<NProust::EBaseGeneratorType::Point>(std::make_unique<NProust::TAlgorithmicaWideSegmentXorEngine<>>(), streamer, csvContext, initStartedAt);
+                    } else {
+                        spdlog::critical("The external Fenwick engine is specialized to the sum problem; XOR has only the Algorithmica baseline");
+                        std::terminate();
+                    }
                 } else {
-                    spdlog::critical("The external engines only support the SumInt32 point problem");
+                    spdlog::critical("The external engines only support the SumInt32 / XorInt32 point problem");
                     std::terminate();
                 }
             } else {
@@ -869,6 +887,86 @@ int main(int argc, char* argv[]) {
                     csvContext
                 );
             }
+            break;
+        }
+        case NProust::EDatasetType::SumDouble: {
+            auto datasetStreamer = NProust::TStreamingDatasetReader<double, double>(*datasetFn);
+            if (withSentinel) {
+                spdlog::critical("Sentinel values are not supported for this type of the dataset");
+                std::terminate();
+            } else {
+                RunDatasetWithSettings<double, double, NProust::TSumOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType, csvContext);
+            }
+            break;
+        }
+        case NProust::EDatasetType::MaxDouble: {
+            auto datasetStreamer = NProust::TStreamingDatasetReader<double, double>(*datasetFn);
+            if (withSentinel) {
+                spdlog::critical("Sentinel values are not supported for this type of the dataset");
+                std::terminate();
+            } else {
+                RunDatasetWithSettings<double, double, NProust::TMaxOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType, csvContext);
+            }
+            break;
+        }
+        case NProust::EDatasetType::XorInt32: {
+            auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, int32_t>(*datasetFn);
+            if (withSentinel) {
+                spdlog::critical("Sentinel values are not supported for this type of the dataset");
+                std::terminate();
+            } else {
+                RunDatasetWithSettings<int32_t, int32_t, NProust::TBitwiseXorOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType, csvContext);
+            }
+            break;
+        }
+        case NProust::EDatasetType::GcdInt32: {
+            auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, int32_t>(*datasetFn);
+            if (withSentinel) {
+                spdlog::critical("Sentinel values are not supported for this type of the dataset");
+                std::terminate();
+            } else {
+                RunDatasetWithSettings<int32_t, int32_t, NProust::TGcdOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType, csvContext);
+            }
+            break;
+        }
+        case NProust::EDatasetType::AndInt32: {
+            auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, int32_t>(*datasetFn);
+            if (withSentinel) {
+                spdlog::critical("Sentinel values are not supported for this type of the dataset");
+                std::terminate();
+            } else {
+                RunDatasetWithSettings<int32_t, int32_t, NProust::TBitwiseAndOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType, csvContext);
+            }
+            break;
+        }
+        case NProust::EDatasetType::OrInt32: {
+            auto datasetStreamer = NProust::TStreamingDatasetReader<int32_t, int32_t>(*datasetFn);
+            if (withSentinel) {
+                spdlog::critical("Sentinel values are not supported for this type of the dataset");
+                std::terminate();
+            } else {
+                RunDatasetWithSettings<int32_t, int32_t, NProust::TBitwiseOrOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType, csvContext);
+            }
+            break;
+        }
+        case NProust::EDatasetType::SumInt16: {
+            auto datasetStreamer = NProust::TStreamingDatasetReader<int16_t, int16_t>(*datasetFn);
+            RunDatasetWithSettings<int16_t, int16_t, NProust::TSumOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType, csvContext);
+            break;
+        }
+        case NProust::EDatasetType::SumInt64: {
+            auto datasetStreamer = NProust::TStreamingDatasetReader<int64_t, int64_t>(*datasetFn);
+            RunDatasetWithSettings<int64_t, int64_t, NProust::TSumOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType, csvContext);
+            break;
+        }
+        case NProust::EDatasetType::XorInt16: {
+            auto datasetStreamer = NProust::TStreamingDatasetReader<int16_t, int16_t>(*datasetFn);
+            RunDatasetWithSettings<int16_t, int16_t, NProust::TBitwiseXorOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType, csvContext);
+            break;
+        }
+        case NProust::EDatasetType::XorInt64: {
+            auto datasetStreamer = NProust::TStreamingDatasetReader<int64_t, int64_t>(*datasetFn);
+            RunDatasetWithSettings<int64_t, int64_t, NProust::TBitwiseXorOperation>(datasetStreamer, *dataLayout, *nodeTopology, *leafSizeLog, *baseGeneratorType, csvContext);
             break;
         }
     }

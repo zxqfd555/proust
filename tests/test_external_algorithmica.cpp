@@ -1,3 +1,4 @@
+#include <limits>
 #include <memory>
 #include <random>
 #include <utility>
@@ -34,6 +35,56 @@ TEST(AlgorithmicaWideTree, IntSumStress) {
         StressTestAlgorithmicaAgainstNaive(length);
     }
     StressTestAlgorithmicaAgainstNaive(1000);
+}
+
+// The XOR specialization shares the structure but a different group; validate it independently
+// against a brute-force XOR reference over the corner-case lengths and a larger one.
+namespace {
+    void StressTestAlgorithmicaXorAgainstReference(const size_t length, const int rounds, const uint32_t seed) {
+        auto engine = NProust::CreateAlgorithmicaWideSegmentXorEngine();
+        engine->Init(length);
+        std::vector<int32_t> reference(length, 0);
+
+        std::mt19937 generator(seed);
+        std::uniform_int_distribution<size_t> positionDistribution(0, length - 1);
+        std::uniform_int_distribution<int32_t> valueDistribution(std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max());
+        std::uniform_int_distribution<size_t> boundDistribution(0, length);
+
+        const auto bruteForceXor = [&](const size_t left, const size_t right) {
+            int32_t acc = 0;
+            for (size_t i = left; i < right; ++i) {
+                acc ^= reference[i];
+            }
+            return acc;
+        };
+
+        for (int round = 0; round < rounds; ++round) {
+            if ((generator() & 1) || length == 1) {
+                const size_t position = positionDistribution(generator);
+                const int32_t value = valueDistribution(generator);
+                engine->SetPoint(position, value);
+                reference[position] = value;
+            } else {
+                size_t left = boundDistribution(generator);
+                size_t right = boundDistribution(generator);
+                if (left > right) {
+                    std::swap(left, right);
+                }
+                if (left == right) {
+                    continue;  // the engine's ComputeRange is undefined on an empty range
+                }
+                EXPECT_EQ(engine->ComputeRange(left, right), bruteForceXor(left, right))
+                    << "length " << length << " range [" << left << ", " << right << ")";
+            }
+        }
+    }
+} // namespace
+
+TEST(AlgorithmicaWideTreeXor, IntXorStress) {
+    for (size_t length = 1; length <= 16; ++length) {
+        StressTestAlgorithmicaXorAgainstReference(length, N_QUERIES_IN_STRESS_TEST, 7000 + static_cast<uint32_t>(length));
+    }
+    StressTestAlgorithmicaXorAgainstReference(1000, N_QUERIES_IN_STRESS_TEST, 424242);
 }
 
 // Exercises the engine at its real, compile-time-fixed capacity (10^6, the dataset length). This

@@ -157,4 +157,121 @@ namespace NProust {
         // aligned operator new, and the base class's virtual destructor frees it correctly.
         return std::make_unique<TAlgorithmicaWideSegmentSumEngine<>>();
     }
+
+    // XOR specialization of the same wide segment tree. XOR is a commutative group whose inverse is
+    // itself (a ^ a == 0), so the structure carries over verbatim with `+`/`-` replaced by `^`: each
+    // node stores running prefix-XORs of its children, a prefix query XORs one read per layer, a
+    // range XOR is `prefix(r) ^ prefix(l)`, and a point update folds `old ^ new` into the suffix with
+    // a masked vector XOR. This is exactly the contrast with the generic engine: the upstream code is
+    // hard-wired to addition, so supporting XOR means *re-deriving and re-writing the whole structure*
+    // here, whereas the generic engine needed only the one `ApplyToMany` hook on `TBitwiseXorOperation`.
+    template<size_t Capacity = 1'000'000>
+    class TAlgorithmicaWideSegmentXorEngine final : public IPointUpdateEngine<int32_t, int32_t, TBitwiseXorOperation> {
+        static constexpr int BLog = 4;
+        static constexpr int B = 1 << BLog;
+
+        static constexpr size_t ComputeSlots() {
+            size_t slots = B;
+            while (slots <= Capacity) {
+                slots *= B;
+            }
+            return slots;
+        }
+        static constexpr size_t Slots = ComputeSlots();
+
+        static constexpr int ComputeHeight() {
+            int height = 0;
+            for (size_t slots = Slots; slots > 1; slots /= B) {
+                ++height;
+            }
+            return height;
+        }
+        static constexpr int H = ComputeHeight();
+
+        static constexpr size_t LayerOffset(const int targetLayer) {
+            size_t start = 0;
+            size_t nodes = Slots;
+            for (int layer = 0; layer < targetLayer; ++layer) {
+                nodes = (nodes + B - 1) / B;
+                start += nodes * B;
+            }
+            return start;
+        }
+
+        static constexpr std::array<size_t, H + 1> ComputeOffsets() {
+            std::array<size_t, H + 1> offsets{};
+            for (int layer = 0; layer <= H; ++layer) {
+                offsets[layer] = LayerOffset(layer);
+            }
+            return offsets;
+        }
+        static constexpr std::array<size_t, H + 1> Offsets = ComputeOffsets();
+        static constexpr size_t TreeSize = Offsets[H];
+
+        static constexpr int RoundDownToBlock(const int k) {
+            return k & ~(B - 1);
+        }
+
+    public:
+        TAlgorithmicaWideSegmentXorEngine() = default;
+
+        virtual void Init(const size_t length) override {
+            assert(length <= Capacity && "The wide segment tree is fixed to its compile-time capacity");
+            Length = length;
+            std::memset(Tree, 0, sizeof(Tree));   // 0 is the XOR identity
+            Values.assign(Capacity, 0);
+            for (int position = 0; position < B; ++position) {
+                for (int lane = 0; lane < B; ++lane) {
+                    Mask[position][lane] = (lane > position) ? -1 : 0;
+                }
+            }
+        }
+
+        virtual void SetPoint(const size_t position, const int32_t& value) override {
+            assert(position < Length && "The point modification goes beyond the active length");
+            // Flipping the element from old to new is one XOR by (old ^ new).
+            const int32_t delta = value ^ Values[position];
+            Values[position] = value;
+            Apply(static_cast<int>(position), delta);
+        }
+
+        virtual int32_t ComputeRange(const size_t left, const size_t right) const override {
+            assert(left < right && "The operation result for an empty range is undefined");
+            assert(right <= Length && "The range goes beyond the active length");
+            return Prefix(static_cast<int>(right)) ^ Prefix(static_cast<int>(left));
+        }
+
+    private:
+        // XOR of the half-open prefix [0, k): one read per layer, no branches.
+        int32_t Prefix(const int k) const {
+            int32_t result = 0;
+            for (int layer = 0; layer < H; ++layer) {
+                result ^= Tree[Offsets[layer] + (k >> (layer * BLog))];
+            }
+            return result;
+        }
+
+        // Fold `x` into element `k`: masked vector XOR over the suffix of one node per layer.
+        void Apply(int k, const int32_t x) {
+            using NAlgorithmicaDetail::TVec;
+            const TVec broadcast = x + TVec{};  // splat x across all eight lanes (bit pattern only)
+            for (int layer = 0; layer < H; ++layer) {
+                auto* node = reinterpret_cast<TVec*>(&Tree[Offsets[layer] + RoundDownToBlock(k)]);
+                auto* mask = reinterpret_cast<TVec*>(&Mask[k & (B - 1)][0]);
+                for (int i = 0; i < B / 8; ++i) {
+                    node[i] ^= broadcast & mask[i];
+                }
+                k >>= BLog;
+            }
+        }
+
+        size_t Length = 0;
+        alignas(64) int32_t Tree[TreeSize];
+        alignas(64) int32_t Mask[B][B];
+        std::vector<int32_t> Values;
+    };
+
+    inline std::unique_ptr<IPointUpdateEngine<int32_t, int32_t, TBitwiseXorOperation>> CreateAlgorithmicaWideSegmentXorEngine() {
+        return std::make_unique<TAlgorithmicaWideSegmentXorEngine<>>();
+    }
 } // namespace NProust

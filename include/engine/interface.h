@@ -21,6 +21,21 @@ namespace NProust {
         { TOperation::template Undo<TOperationResult>(lhs, rhs) } -> std::same_as<TOperationResult>;
     };
 
+    // Optional bulk modification hook. The engine sometimes needs to merge one `delta` into a whole
+    // contiguous run of accumulators in place; by default it does so with a scalar loop. An operation
+    // may instead expose `ApplyToMany` and do the run however it likes -- e.g. in a few SIMD
+    // instructions. The operation is told the full `block` of `count` accumulators and which prefix
+    // to leave untouched (`from`), so it is free to process the whole fixed-size block branchlessly
+    // with a lane mask; the engine never reveals *why* the run is shaped this way.
+    //
+    // Contract: ApplyToMany(block, count, from, delta) must leave it observably equal to
+    //   for (i = from; i < count; ++i) block[i] = Merge(block[i], delta);
+    // and may read (but must not modify) block[0 .. from), which is always valid memory.
+    template<typename TOperation, typename TOperationResult>
+    concept HasApplyToMany = requires(TOperationResult* block, size_t count, size_t from, const TOperationResult& delta) {
+        { TOperation::template ApplyToMany<TOperationResult>(block, count, from, delta) };
+    };
+
     template<class TOperationResult>
     class IQueryableEngine {
     public:

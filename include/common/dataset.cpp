@@ -32,6 +32,36 @@ namespace NProust {
         if (s == "OrderStatistic16") {
             return EDatasetType::OrderStatistic16;
         }
+        if (s == "SumDouble") {
+            return EDatasetType::SumDouble;
+        }
+        if (s == "MaxDouble") {
+            return EDatasetType::MaxDouble;
+        }
+        if (s == "XorInt32") {
+            return EDatasetType::XorInt32;
+        }
+        if (s == "GcdInt32") {
+            return EDatasetType::GcdInt32;
+        }
+        if (s == "AndInt32") {
+            return EDatasetType::AndInt32;
+        }
+        if (s == "OrInt32") {
+            return EDatasetType::OrInt32;
+        }
+        if (s == "SumInt16") {
+            return EDatasetType::SumInt16;
+        }
+        if (s == "SumInt64") {
+            return EDatasetType::SumInt64;
+        }
+        if (s == "XorInt16") {
+            return EDatasetType::XorInt16;
+        }
+        if (s == "XorInt64") {
+            return EDatasetType::XorInt64;
+        }
         return std::nullopt;
     }
 
@@ -87,6 +117,92 @@ namespace NProust {
                     fname,
                     NProustExamples::CreateNaiveInverseOrderStatisticsEngine<16>()
                 );
+                break;
+            }
+            case EDatasetType::SumDouble: {
+                // Integer-valued doubles bounded so every partial sum stays exact (see
+                // CreateExactDoubleSumGenerator): keeps the bit-exact ground-truth check valid
+                // despite floating-point non-associativity.
+                GenerateTestPlanIntoFile<double, double, NProust::TSumOperation>(
+                    length,
+                    queryCount,
+                    baseGenerator,
+                    CreateExactDoubleSumGenerator(-1000, 1000),
+                    fname
+                );
+                break;
+            }
+            case EDatasetType::MaxDouble: {
+                GenerateTestPlanIntoFile<double, double, NProust::TMaxOperation>(
+                    length,
+                    queryCount,
+                    baseGenerator,
+                    CreateRandomDoubleGenerator(-1.0e6, 1.0e6),
+                    fname
+                );
+                break;
+            }
+            case EDatasetType::XorInt32: {
+                GenerateTestPlanIntoFile<int32_t, int32_t, NProust::TBitwiseXorOperation>(
+                    length,
+                    queryCount,
+                    baseGenerator,
+                    RegularTaskElementGenerator<int32_t>(),
+                    fname
+                );
+                break;
+            }
+            case EDatasetType::GcdInt32: {
+                // Positive values so that a single element's result (itself) matches the non-negative
+                // convention of std::gcd over a multi-element range.
+                GenerateTestPlanIntoFile<int32_t, int32_t, NProust::TGcdOperation>(
+                    length,
+                    queryCount,
+                    baseGenerator,
+                    CreateRandomIntGenerator<int32_t>(1, 1'000'000'000),
+                    fname
+                );
+                break;
+            }
+            case EDatasetType::AndInt32: {
+                GenerateTestPlanIntoFile<int32_t, int32_t, NProust::TBitwiseAndOperation>(
+                    length,
+                    queryCount,
+                    baseGenerator,
+                    RegularTaskElementGenerator<int32_t>(),
+                    fname
+                );
+                break;
+            }
+            case EDatasetType::OrInt32: {
+                GenerateTestPlanIntoFile<int32_t, int32_t, NProust::TBitwiseOrOperation>(
+                    length,
+                    queryCount,
+                    baseGenerator,
+                    RegularTaskElementGenerator<int32_t>(),
+                    fname
+                );
+                break;
+            }
+            case EDatasetType::SumInt16: {
+                // Full-range int16: sums wrap mod 2^16 in both the engine and the naive ground truth.
+                GenerateTestPlanIntoFile<int16_t, int16_t, NProust::TSumOperation>(
+                    length, queryCount, baseGenerator, RegularTaskElementGenerator<int16_t>(), fname);
+                break;
+            }
+            case EDatasetType::SumInt64: {
+                GenerateTestPlanIntoFile<int64_t, int64_t, NProust::TSumOperation>(
+                    length, queryCount, baseGenerator, SummationTaskElementGenerator<int64_t>(length), fname);
+                break;
+            }
+            case EDatasetType::XorInt16: {
+                GenerateTestPlanIntoFile<int16_t, int16_t, NProust::TBitwiseXorOperation>(
+                    length, queryCount, baseGenerator, RegularTaskElementGenerator<int16_t>(), fname);
+                break;
+            }
+            case EDatasetType::XorInt64: {
+                GenerateTestPlanIntoFile<int64_t, int64_t, NProust::TBitwiseXorOperation>(
+                    length, queryCount, baseGenerator, RegularTaskElementGenerator<int64_t>(), fname);
                 break;
             }
         }

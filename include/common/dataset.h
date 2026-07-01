@@ -17,6 +17,16 @@ namespace NProust {
         MaxInt32,
         MaxSumInt32,
         OrderStatistic16,
+        SumDouble,
+        MaxDouble,
+        XorInt32,
+        GcdInt32,
+        AndInt32,
+        OrInt32,
+        SumInt16,
+        SumInt64,
+        XorInt16,
+        XorInt64,
     };
 
     enum class EBaseGeneratorType {
@@ -34,6 +44,26 @@ namespace NProust {
             static std::uniform_int_distribution<TValue> valueDistribution(lower, upper);
             auto value = valueDistribution(generator);
             return value;
+        };
+    }
+
+    // Produces integer-valued doubles in [lower, upper]. Float/double addition is *not* associative,
+    // so the segment tree's merge order would disagree with the naive left-to-right ground truth on
+    // rounded values, breaking the bit-exact correctness check. Keeping every value an exact integer
+    // small enough that all partial sums stay below 2^53 makes double addition exact regardless of
+    // order, so the check stays valid while the engine still executes genuine double FP instructions.
+    inline std::function<double(std::mt19937&)> CreateExactDoubleSumGenerator(const int32_t lower, const int32_t upper) {
+        return [lower, upper](std::mt19937& generator) {
+            static std::uniform_int_distribution<int32_t> valueDistribution(lower, upper);
+            return static_cast<double>(valueDistribution(generator));
+        };
+    }
+
+    // Arbitrary fractional doubles. Safe for max (which never rounds), not for sum.
+    inline std::function<double(std::mt19937&)> CreateRandomDoubleGenerator(const double lower, const double upper) {
+        return [lower, upper](std::mt19937& generator) {
+            static std::uniform_real_distribution<double> valueDistribution(lower, upper);
+            return valueDistribution(generator);
         };
     }
 
