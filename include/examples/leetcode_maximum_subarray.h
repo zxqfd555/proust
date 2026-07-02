@@ -20,12 +20,12 @@ namespace NProustExamples {
         template<typename TValue, typename TOperationResult>
         static TOperationResult FromRepeated(const TValue& v, size_t times) noexcept {
             if constexpr (std::is_same_v<TValue, int32_t> && std::is_same_v<TOperationResult, TMaxSumState>) {
-                int32_t fullSum = v * times;
-                if (v > 0) {
-                    return {fullSum, fullSum, fullSum, fullSum};
-                } else {
-                    return {v, v, v, fullSum};
-                }
+                // Branchless on purpose: the sign of `v` is data-random, and this is called on every
+                // level of the range engine's descent (AssignWholeNode), where a mispredicted jump
+                // costs a pipeline flush. A ternary compiles to cmov.
+                const int32_t fullSum = v * times;
+                const int32_t bestPartialSum = v > 0 ? fullSum : v;
+                return {bestPartialSum, bestPartialSum, bestPartialSum, fullSum};
             } else {
                 static_assert(sizeof(TValue) == 0, "Unsupported type for TMaxSumStateOperation::FromRepeated");
             }
@@ -126,7 +126,25 @@ namespace NProustExamples {
 
     template<typename TOperationResult, typename TValue>
     TOperationResult TMaxSumStateOperation::FromMany(const TValue* data, const size_t rangeStart, const size_t rangeEnd) noexcept {
-        return TNaiveMaxSumEngine::ComputeStateNaively(data, rangeStart, rangeEnd);
+        // A single forward pass, unlike the naive engine's two-pass reference above (kept two-pass
+        // on purpose: the ground truth should not share code shapes with the optimized path). The
+        // suffix maximum falls out of the forward pass for free: Kadane's "best subarray ending
+        // here" evaluated at the last element *is* the best non-empty suffix sum.
+        int32_t fullSum = data[rangeStart];
+        int32_t maxPrefixSum = fullSum;
+        int32_t maxSubarraySum = fullSum;
+        int32_t bestEndingHere = fullSum;
+
+        for (size_t index = rangeStart + 1; index < rangeEnd; ++index) {
+            const int32_t element = data[index];
+            const int32_t extended = bestEndingHere + element;
+            bestEndingHere = extended > element ? extended : element;
+            maxSubarraySum = maxSubarraySum > bestEndingHere ? maxSubarraySum : bestEndingHere;
+            fullSum += element;
+            maxPrefixSum = maxPrefixSum > fullSum ? maxPrefixSum : fullSum;
+        }
+
+        return {maxSubarraySum, maxPrefixSum, bestEndingHere, fullSum};
     }
 
     inline std::unique_ptr<NProust::IRangeUpdateEngine<int32_t, TMaxSumState, TMaxSumStateOperation>> CreateNaiveMaxSumEngine() {

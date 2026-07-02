@@ -123,10 +123,106 @@ namespace NProust {
             }
         }
 
+        // Assigns the value to the whole node: record the lazy tag and the recomputed subtree value.
+        inline void AssignWholeNode(const size_t nodeId, const size_t nodeLength, const TValue& value) {
+            Nodes.SetLazilyPropagated(nodeId, value);
+            Nodes.SetSubtreeValue(nodeId, TOperation::template FromRepeated<TValue, TOperationResult>(value, nodeLength));
+        }
+
+        // One-sided descent: assigns the *suffix* [rangeStart, nodeEnd) of the node. Once the generic
+        // descent splits at the highest node straddling the range, the left fringe only ever sees
+        // suffix assignments, so it needs a single boundary test per level instead of two -- and the
+        // fully covered right child is handled with two straight-line writes instead of a recursive
+        // call re-deriving that coverage from both bounds.
+        inline void ModifySuffix(const size_t nodeId, const size_t rangeStart, const size_t nodeStart, const size_t nodeEnd, const TValue& value) {
+            if (rangeStart <= nodeStart) {
+                AssignWholeNode(nodeId, nodeEnd - nodeStart, value);
+                return;
+            }
+
+            if (TNodeTopology::IsLeaf(nodeEnd - nodeStart)) [[unlikely]] {
+                ModifyLeaf(nodeId, rangeStart, nodeEnd, nodeStart, nodeEnd, value);
+                return;
+            }
+
+            const size_t midpoint = (nodeStart + nodeEnd) >> 1;
+            const size_t leftChildId = TNodeTopology::LeftChild(nodeId, nodeEnd - nodeStart);
+            const size_t rightChildId = TNodeTopology::RightChild(nodeId, nodeEnd - nodeStart);
+            const bool hasLazilyPropagated = Nodes.HasLazilyPropagated(nodeId);
+
+            if (rangeStart < midpoint) {
+                // The right child is fully covered by the assignment, so the parent's pending tag
+                // never needs to reach it: it is overwritten wholesale right here.
+                if (hasLazilyPropagated) {
+                    Nodes.SetLazilyPropagated(leftChildId, Nodes.GetLazilyPropagated(nodeId));
+                    Nodes.DropLazilyPropagated(nodeId);
+                }
+                ModifySuffix(leftChildId, rangeStart, nodeStart, midpoint, value);
+                AssignWholeNode(rightChildId, nodeEnd - midpoint, value);
+            } else {
+                // The assignment lives entirely in the right child; the left one only receives the
+                // pending tag (with its subtree value refreshed, as it is not descended into).
+                if (hasLazilyPropagated) {
+                    const TValue toPropagate = Nodes.GetLazilyPropagated(nodeId);
+                    Nodes.SetLazilyPropagated(leftChildId, toPropagate);
+                    Nodes.SetSubtreeValue(leftChildId, TOperation::template FromRepeated<TValue, TOperationResult>(toPropagate, midpoint - nodeStart));
+                    Nodes.SetLazilyPropagated(rightChildId, toPropagate);
+                    Nodes.DropLazilyPropagated(nodeId);
+                }
+                ModifySuffix(rightChildId, rangeStart, midpoint, nodeEnd, value);
+            }
+
+            Nodes.SetSubtreeValue(nodeId, TOperation::Merge(Nodes.GetSubtreeValue(leftChildId), Nodes.GetSubtreeValue(rightChildId)));
+        }
+
+        // Mirror of ModifySuffix: assigns the *prefix* [nodeStart, rangeEnd) of the node.
+        inline void ModifyPrefix(const size_t nodeId, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd, const TValue& value) {
+            if (rangeEnd >= nodeEnd) {
+                AssignWholeNode(nodeId, nodeEnd - nodeStart, value);
+                return;
+            }
+
+            if (TNodeTopology::IsLeaf(nodeEnd - nodeStart)) [[unlikely]] {
+                ModifyLeaf(nodeId, nodeStart, rangeEnd, nodeStart, nodeEnd, value);
+                return;
+            }
+
+            const size_t midpoint = (nodeStart + nodeEnd) >> 1;
+            const size_t leftChildId = TNodeTopology::LeftChild(nodeId, nodeEnd - nodeStart);
+            const size_t rightChildId = TNodeTopology::RightChild(nodeId, nodeEnd - nodeStart);
+            const bool hasLazilyPropagated = Nodes.HasLazilyPropagated(nodeId);
+
+            if (rangeEnd > midpoint) {
+                if (hasLazilyPropagated) {
+                    Nodes.SetLazilyPropagated(rightChildId, Nodes.GetLazilyPropagated(nodeId));
+                    Nodes.DropLazilyPropagated(nodeId);
+                }
+                AssignWholeNode(leftChildId, midpoint - nodeStart, value);
+                ModifyPrefix(rightChildId, rangeEnd, midpoint, nodeEnd, value);
+            } else {
+                if (hasLazilyPropagated) {
+                    const TValue toPropagate = Nodes.GetLazilyPropagated(nodeId);
+                    Nodes.SetLazilyPropagated(rightChildId, toPropagate);
+                    Nodes.SetSubtreeValue(rightChildId, TOperation::template FromRepeated<TValue, TOperationResult>(toPropagate, nodeEnd - midpoint));
+                    Nodes.SetLazilyPropagated(leftChildId, toPropagate);
+                    Nodes.DropLazilyPropagated(nodeId);
+                }
+                ModifyPrefix(leftChildId, rangeEnd, nodeStart, midpoint, value);
+            }
+
+            Nodes.SetSubtreeValue(nodeId, TOperation::Merge(Nodes.GetSubtreeValue(leftChildId), Nodes.GetSubtreeValue(rightChildId)));
+        }
+
+        // The generic descent is now only the *spine*: it walks down while the range is strictly
+        // interior to the node, and hands the two fringes to the one-sided specializations at the
+        // split node. Ranges touching a node boundary are handed over immediately.
         inline void ModifyNodes(const size_t nodeId, const size_t rangeStart, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd, const TValue& value) {
-            if (rangeStart <= nodeStart && rangeEnd >= nodeEnd) {
-                Nodes.SetLazilyPropagated(nodeId, value);
-                Nodes.SetSubtreeValue(nodeId, TOperation::template FromRepeated<TValue, TOperationResult>(value, nodeEnd - nodeStart));
+            if (rangeStart <= nodeStart) {
+                ModifyPrefix(nodeId, rangeEnd, nodeStart, nodeEnd, value);
+                return;
+            }
+            if (rangeEnd >= nodeEnd) {
+                ModifySuffix(nodeId, rangeStart, nodeStart, nodeEnd, value);
                 return;
             }
 
@@ -135,34 +231,38 @@ namespace NProust {
                 // it out of line means the recursive descent body stays free of AVX, so its prologue
                 // skips the 32-byte stack realignment and vzeroupper that the inlined kernel forces.
                 ModifyLeaf(nodeId, rangeStart, rangeEnd, nodeStart, nodeEnd, value);
-            } else {
-                const size_t midpoint = (nodeStart + nodeEnd) >> 1;
-                const size_t leftChildId = TNodeTopology::LeftChild(nodeId, nodeEnd - nodeStart);
-                const size_t rightChildId = TNodeTopology::RightChild(nodeId, nodeEnd - nodeStart);
+                return;
+            }
 
-                const bool hasLazilyPropagated = Nodes.HasLazilyPropagated(nodeId);
-                TValue toPropagate = hasLazilyPropagated ? Nodes.GetLazilyPropagated(nodeId) : TValue();
+            const size_t midpoint = (nodeStart + nodeEnd) >> 1;
+            const size_t leftChildId = TNodeTopology::LeftChild(nodeId, nodeEnd - nodeStart);
+            const size_t rightChildId = TNodeTopology::RightChild(nodeId, nodeEnd - nodeStart);
 
+            const bool hasLazilyPropagated = Nodes.HasLazilyPropagated(nodeId);
+            TValue toPropagate = hasLazilyPropagated ? Nodes.GetLazilyPropagated(nodeId) : TValue();
+
+            if (hasLazilyPropagated) {
+                Nodes.SetLazilyPropagated(leftChildId, toPropagate);
+                Nodes.SetLazilyPropagated(rightChildId, toPropagate);
+                Nodes.DropLazilyPropagated(nodeId);
+            }
+
+            if (rangeEnd <= midpoint) {
+                ModifyNodes(leftChildId, rangeStart, rangeEnd, nodeStart, midpoint, value);
                 if (hasLazilyPropagated) {
-                    Nodes.SetLazilyPropagated(leftChildId, toPropagate);
-                    Nodes.SetLazilyPropagated(rightChildId, toPropagate);
-                    Nodes.DropLazilyPropagated(nodeId);
-                }
-
-                if (midpoint > rangeStart) {
-                    ModifyNodes(leftChildId, rangeStart, rangeEnd, nodeStart, midpoint, value);
-                } else if (hasLazilyPropagated) {
-                    Nodes.SetSubtreeValue(leftChildId, TOperation::template FromRepeated<TValue, TOperationResult>(toPropagate, midpoint - nodeStart));
-                }
-
-                if (midpoint < rangeEnd) {
-                    ModifyNodes(rightChildId, rangeStart, rangeEnd, midpoint, nodeEnd, value);
-                } else if (hasLazilyPropagated) {
                     Nodes.SetSubtreeValue(rightChildId, TOperation::template FromRepeated<TValue, TOperationResult>(toPropagate, nodeEnd - midpoint));
                 }
-
-                Nodes.SetSubtreeValue(nodeId, TOperation::Merge(Nodes.GetSubtreeValue(leftChildId), Nodes.GetSubtreeValue(rightChildId)));
+            } else if (rangeStart >= midpoint) {
+                ModifyNodes(rightChildId, rangeStart, rangeEnd, midpoint, nodeEnd, value);
+                if (hasLazilyPropagated) {
+                    Nodes.SetSubtreeValue(leftChildId, TOperation::template FromRepeated<TValue, TOperationResult>(toPropagate, midpoint - nodeStart));
+                }
+            } else {
+                ModifySuffix(leftChildId, rangeStart, nodeStart, midpoint, value);
+                ModifyPrefix(rightChildId, rangeEnd, midpoint, nodeEnd, value);
             }
+
+            Nodes.SetSubtreeValue(nodeId, TOperation::Merge(Nodes.GetSubtreeValue(leftChildId), Nodes.GetSubtreeValue(rightChildId)));
         }
 
         // Out-of-line leaf reduction for the query path (see the call site in QueryNodes).
@@ -178,39 +278,87 @@ namespace NProust {
             }
         }
 
-        inline TOperationResult QueryNodes(const size_t nodeId, const size_t rangeStart, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd) const {
-            if (rangeStart <= nodeStart && rangeEnd >= nodeEnd) {
+        // One-sided descent for the query's left fringe: computes the *suffix* [rangeStart, nodeEnd).
+        // One boundary test per level, and the fully covered right sibling contributes with a direct
+        // array read instead of a recursive call that would re-derive its coverage from both bounds.
+        inline TOperationResult QuerySuffix(const size_t nodeId, const size_t rangeStart, const size_t nodeStart, const size_t nodeEnd) const {
+            if (rangeStart <= nodeStart) {
                 return Nodes.GetSubtreeValue(nodeId);
             }
 
             if (Nodes.HasLazilyPropagated(nodeId)) {
-                const auto lazilyPropagated = Nodes.GetLazilyPropagated(nodeId);
-                const size_t segmentStart = std::max(rangeStart, nodeStart);
-                const size_t segmentEnd = std::min(rangeEnd, nodeEnd);
-                return TOperation::template FromRepeated<TValue, TOperationResult>(lazilyPropagated, segmentEnd - segmentStart);
+                return TOperation::template FromRepeated<TValue, TOperationResult>(Nodes.GetLazilyPropagated(nodeId), nodeEnd - rangeStart);
+            }
+
+            if (TNodeTopology::IsLeaf(nodeEnd - nodeStart)) {
+                return QueryLeaf(rangeStart, nodeEnd);
+            }
+
+            const size_t midpoint = (nodeStart + nodeEnd) >> 1;
+            if (rangeStart < midpoint) {
+                const size_t leftChildId = TNodeTopology::LeftChild(nodeId, nodeEnd - nodeStart);
+                const size_t rightChildId = TNodeTopology::RightChild(nodeId, nodeEnd - nodeStart);
+                return TOperation::Merge(QuerySuffix(leftChildId, rangeStart, nodeStart, midpoint), Nodes.GetSubtreeValue(rightChildId));
+            }
+            return QuerySuffix(TNodeTopology::RightChild(nodeId, nodeEnd - nodeStart), rangeStart, midpoint, nodeEnd);
+        }
+
+        // Mirror of QuerySuffix: computes the *prefix* [nodeStart, rangeEnd).
+        inline TOperationResult QueryPrefix(const size_t nodeId, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd) const {
+            if (rangeEnd >= nodeEnd) {
+                return Nodes.GetSubtreeValue(nodeId);
+            }
+
+            if (Nodes.HasLazilyPropagated(nodeId)) {
+                return TOperation::template FromRepeated<TValue, TOperationResult>(Nodes.GetLazilyPropagated(nodeId), rangeEnd - nodeStart);
+            }
+
+            if (TNodeTopology::IsLeaf(nodeEnd - nodeStart)) {
+                return QueryLeaf(nodeStart, rangeEnd);
+            }
+
+            const size_t midpoint = (nodeStart + nodeEnd) >> 1;
+            if (rangeEnd > midpoint) {
+                const size_t leftChildId = TNodeTopology::LeftChild(nodeId, nodeEnd - nodeStart);
+                const size_t rightChildId = TNodeTopology::RightChild(nodeId, nodeEnd - nodeStart);
+                return TOperation::Merge(Nodes.GetSubtreeValue(leftChildId), QueryPrefix(rightChildId, rangeEnd, midpoint, nodeEnd));
+            }
+            return QueryPrefix(TNodeTopology::LeftChild(nodeId, nodeEnd - nodeStart), rangeEnd, nodeStart, midpoint);
+        }
+
+        // The generic query is now only the *spine* (see ModifyNodes): it descends while the range is
+        // strictly interior and splits into the two one-sided fringe walks at the straddling node.
+        inline TOperationResult QueryNodes(const size_t nodeId, const size_t rangeStart, const size_t rangeEnd, const size_t nodeStart, const size_t nodeEnd) const {
+            if (rangeStart <= nodeStart) {
+                return QueryPrefix(nodeId, rangeEnd, nodeStart, nodeEnd);
+            }
+            if (rangeEnd >= nodeEnd) {
+                return QuerySuffix(nodeId, rangeStart, nodeStart, nodeEnd);
+            }
+
+            if (Nodes.HasLazilyPropagated(nodeId)) {
+                return TOperation::template FromRepeated<TValue, TOperationResult>(Nodes.GetLazilyPropagated(nodeId), rangeEnd - rangeStart);
             }
 
             if (TNodeTopology::IsLeaf(nodeEnd - nodeStart)) {
                 // Out of line: keeps the AVX leaf reduction (and its stack realignment) out of the
                 // recursive descent. See ModifyLeaf for the same reasoning.
-                return QueryLeaf(std::max(rangeStart, nodeStart), std::min(rangeEnd, nodeEnd));
-            } else {
-                const size_t midpoint = (nodeStart + nodeEnd) >> 1;
-                if (midpoint > rangeStart) {
-                    const size_t leftChildId = TNodeTopology::LeftChild(nodeId, nodeEnd - nodeStart);
-                    const TOperationResult leftResult = QueryNodes(leftChildId, rangeStart, rangeEnd, nodeStart, midpoint);
-                    if (midpoint < rangeEnd) {
-                        const size_t rightChildId = TNodeTopology::RightChild(nodeId, nodeEnd - nodeStart);
-                        const TOperationResult rightResult = QueryNodes(rightChildId, rangeStart, rangeEnd, midpoint, nodeEnd);
-                        return TOperation::Merge(leftResult, rightResult);
-                    } else {
-                        return leftResult;
-                    }
-                }
-
-                const size_t rightChildId = TNodeTopology::RightChild(nodeId, nodeEnd - nodeStart);
-                return QueryNodes(rightChildId, rangeStart, rangeEnd, midpoint, nodeEnd);
+                return QueryLeaf(rangeStart, rangeEnd);
             }
+
+            const size_t midpoint = (nodeStart + nodeEnd) >> 1;
+            if (rangeEnd <= midpoint) {
+                return QueryNodes(TNodeTopology::LeftChild(nodeId, nodeEnd - nodeStart), rangeStart, rangeEnd, nodeStart, midpoint);
+            }
+            if (rangeStart >= midpoint) {
+                return QueryNodes(TNodeTopology::RightChild(nodeId, nodeEnd - nodeStart), rangeStart, rangeEnd, midpoint, nodeEnd);
+            }
+
+            const size_t leftChildId = TNodeTopology::LeftChild(nodeId, nodeEnd - nodeStart);
+            const size_t rightChildId = TNodeTopology::RightChild(nodeId, nodeEnd - nodeStart);
+            return TOperation::Merge(
+                QuerySuffix(leftChildId, rangeStart, nodeStart, midpoint),
+                QueryPrefix(rightChildId, rangeEnd, midpoint, nodeEnd));
         }
     };
 

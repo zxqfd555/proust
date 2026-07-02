@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <limits>
 
 #include "engine/robust/engine.h"
 #include "engine/operations.h"
@@ -51,24 +52,32 @@ namespace NProustExamples {
         template<typename TOperationResult>
         inline static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) noexcept {
             if constexpr (std::is_same_v<TOperationResult, TState>) {
-                // A bounded two-way merge of two descending, distinct sequences. We take the
-                // larger front each step and, on a tie, take it once and drop the duplicate,
-                // stopping after StatisticsRequired values. No allocation, ever.
+                // A bounded two-way merge of two descending, distinct sequences, stopping after
+                // StatisticsRequired values. No allocation, ever.
+                //
+                // The body is deliberately branch-free: each front is read through an "exhausted ->
+                // INT32_MIN" guard, the larger front is taken with a max, and the two cursors advance
+                // by comparison results (compiled to cmov/setcc, not jumps). The data-dependent
+                // branches of the straightforward three-way if-chain mispredict on essentially every
+                // iteration -- the comparison outcome is random -- and this merge is the single
+                // hottest loop of the order-statistic benchmarks. A tie (both fronts equal) takes the
+                // value once and advances both cursors, which is exactly the duplicate-dropping the
+                // three-way form did. The INT32_MIN guard is only a comparison key, never stored: a
+                // *real* INT32_MIN at a front is still taken, because the loop condition guarantees
+                // at least one cursor is in bounds, and the cursor of an exhausted side may step past
+                // its Size without harm -- the guard keeps reporting INT32_MIN for it.
                 TOperationResult result;
                 uint32_t leftIndex = 0;
                 uint32_t rightIndex = 0;
                 uint32_t resultSize = 0;
 
                 while (resultSize < StatisticsRequired && (leftIndex < lhs.Size || rightIndex < rhs.Size)) {
-                    if (leftIndex < lhs.Size && (rightIndex >= rhs.Size || lhs.Values[leftIndex] > rhs.Values[rightIndex])) {
-                        result.Values[resultSize++] = lhs.Values[leftIndex++];
-                    } else if (rightIndex < rhs.Size && (leftIndex >= lhs.Size || rhs.Values[rightIndex] > lhs.Values[leftIndex])) {
-                        result.Values[resultSize++] = rhs.Values[rightIndex++];
-                    } else {
-                        // Both fronts are equal: keep one, drop the duplicate.
-                        result.Values[resultSize++] = lhs.Values[leftIndex++];
-                        ++rightIndex;
-                    }
+                    const int32_t leftFront = leftIndex < lhs.Size ? lhs.Values[leftIndex] : std::numeric_limits<int32_t>::min();
+                    const int32_t rightFront = rightIndex < rhs.Size ? rhs.Values[rightIndex] : std::numeric_limits<int32_t>::min();
+                    const int32_t taken = leftFront > rightFront ? leftFront : rightFront;
+                    result.Values[resultSize++] = taken;
+                    leftIndex += (leftFront == taken);
+                    rightIndex += (rightFront == taken);
                 }
 
                 result.Size = resultSize;

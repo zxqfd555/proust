@@ -44,6 +44,13 @@ In brief, the main lines are:
   - [Before and after](#before-and-after)
   - [Carrying it to floating point and XOR](#carrying-it-to-floating-point-and-xor)
   - [Borrowing the wide tree's trick: a vectorized-update concept](#borrowing-the-wide-trees-trick-a-vectorized-update-concept)
+- [A second round: specializing the descent](#a-second-round-specializing-the-descent)
+  - [One-sided fringe walks in the range engine](#one-sided-fringe-walks-in-the-range-engine)
+  - [A branchless top-K merge](#a-branchless-top-k-merge)
+  - [Squeezing the max-subarray operation](#squeezing-the-max-subarray-operation)
+  - [Rejected by measurement](#rejected-by-measurement)
+  - [Two measurement artifacts worth recording](#two-measurement-artifacts-worth-recording)
+  - [Net effect of the round](#net-effect-of-the-round)
 - [Ensuring code quality](#ensuring-code-quality)
 - [Building and Dependencies](#building-and-dependencies)
 
@@ -587,6 +594,65 @@ The residual ~2 ns to the wide tree is the query, and two attempts to close it c
 | int32 **XOR**, point | 29 ns | 25 ns | ~1.16× |
 
 So per operation the generic engine runs within a small constant factor of a structure written specifically for it, while a specialized structure has to be re-derived for each new problem (a third time for the next group, a fourth for `double`, and not at all for a non-invertible operation like `max`, whose prefix trick does not exist). That is the trade the project is built around — a small, bounded constant-factor cost in exchange for covering an open-ended family of problems with one tested engine — and it is only this clear because there was a specialized reference to measure it against.
+
+## A second round: specializing the descent
+
+A later optimization pass, run under the same discipline as the [first one](#a-round-of-empirical-optimization) — every change measured interleaved A/B against the previous accepted state, kept only when the measurement defends it — produced one structural change to the range engine, two operation-level changes, and a couple of rejections that are worth recording alongside the wins. The section closes with two measurement artifacts this round surfaced, both of which changed the protocol itself.
+
+### One-sided fringe walks in the range engine
+
+The generic recursive descent treats every node identically: check full coverage against *both* range bounds, and recurse into whichever children intersect the range. But the shape of a range operation is not uniform. The descent from the root first follows a *spine* — the range strictly interior to one child per level — until it reaches the highest node the range straddles; from there it splits into a *left fringe*, which only ever assigns or reads a suffix `[rangeStart, nodeEnd)` of each node it visits, and a *right fringe*, which only ever sees prefixes. The generic code re-derives this from both bounds at every level, and — worse — pays a full recursive call for the fully covered child hanging off each fringe level, only for that call to rediscover at its entry check what the parent already knew.
+
+`ModifyNodes`/`QueryNodes` are now only the spine; at the split node they hand the fringes to one-sided specializations (`ModifySuffix`/`ModifyPrefix`, `QuerySuffix`/`QueryPrefix`). Each fringe level tests a single bound, the fully covered sibling is handled in place — two straight-line writes (lazy tag plus recomputed subtree value) on the modify path, a single adjacent array read on the query path — and the parent's pending lazy tag is no longer pushed into a child that the current assignment overwrites wholesale anyway. The transformation is purely structural: the same nodes are touched, in the same left-to-right merge order the non-commutative operations require.
+
+Interleaved A/B on the main range datasets (average mode, median of five):
+
+| Task, range flavor | before | after | speedup |
+| --- | ---: | ---: | ---: |
+| sum | 247 ns | 217 ns | **1.14×** |
+| max | 303 ns | 238 ns | **1.27×** |
+| max-subarray | 507 ns | 405 ns | **1.25×** |
+| order statistic (K=16) | 824 ns | 821 ns | 1.00× |
+
+The pattern repeats the first round's lesson: the win is largest where per-node work is small (sum, max — the saved calls and checks are a real fraction of the budget) and fades to nothing where a sixteen-way state merge dwarfs the traversal (the order statistic). The per-operation (fenced) mode shows the same direction, sum ~1.20×.
+
+### A branchless top-K merge
+
+The order-statistic cells are dominated by one loop: merging two descending, distinct top-K sequences. The straightforward three-way if-chain (take left / take right / tie — drop the duplicate) branches on a comparison whose outcome is data-random, so it mispredicts on essentially every iteration, and at K=16 that is sixteen flushes per merge. The merge is now branch-free: each front is read through an "exhausted → `INT32_MIN`" guard, the winner is a `max`, and both cursors advance by comparison results — `cmov`/`setcc`, nothing to predict. A tie takes the value once and advances both cursors, which is exactly the duplicate-dropping the branchy form did; a *real* `INT32_MIN` at a front still works, because the loop condition guarantees at least one cursor is in bounds and an exhausted side's cursor may harmlessly step past its end while the guard keeps reporting the sentinel.
+
+Measured on the order-statistic datasets: **1.17×** on the point flavor (whose queries, per the [workload analysis](#order-statistic-the-gap-is-the-workload-not-the-engine), merge real top-K states down the whole path) and **1.06×** on the range flavor (where most queries are answered from a lazy tag before any merging starts).
+
+### Squeezing the max-subarray operation
+
+Two smaller changes to `TMaxSumStateOperation`, accepted as one unit. Its `FromMany` — the leaf-block summarizer — was a call into the naive engine's two-pass reference (a forward pass, then a *backward* pass for the maximum suffix sum). One forward pass suffices: Kadane's "best subarray ending here", evaluated at the last element, *is* the best non-empty suffix sum. The naive engine deliberately keeps the two-pass form — the ground truth should not share code shapes with the path it validates. And `FromRepeated`, called on every level of the descent when a node is assigned wholesale, branched on the sign of the incoming value — a data-random branch; it is now a ternary that compiles to a `cmov`. Together: **1.12×** on max-subarray point (where every update rebuilds a leaf block through `FromMany`), neutral on the range flavor.
+
+### Rejected by measurement
+
+Consistent with the first round's experience, the rejected hypotheses say as much about the engine as the accepted ones:
+
+- **Dropping the top-K state's zero-initialization.** `TTopKState` value-initializes its sixteen-slot array, which costs two 32-byte stores on every `Merge` temporary; every reader honors `Size`, so the zeroing is semantically dead. Measured: 0.98× on a clean tie-break — the stores were free all along (store-forwarded, off the critical path), and the change traded them for indeterminate-value semantics. Rejected.
+- **Unrolling the one-sided query recursion into a descent loop.** The fringe recursion is linear, so it converts mechanically into a loop with a running accumulator. A decisive 15-pair run put the effect at 1.01–1.02× (geomean) for the register-sized states — GCC was already compiling the recursion that well — and a measured **loss** (~0.89×) for the 68-byte top-K state, where the accumulator forces one extra state copy per covered sibling that the recursive build-on-return form never materializes. Rejected in full; the recursive form stays.
+- **`FromMany` for max/min.** Rejected without a run: the disassembly shows the generic per-element `Merge` fold already auto-vectorizes into the same `vpmaxsd` reduction a bulk method would hand-write (the release binary carries 2,689 of them). This is the [SIMD discussion](#simd-discussion)'s conclusion arriving from a third direction.
+
+### Two measurement artifacts worth recording
+
+Both of this round's near-misses came from the measurement, not the code, and both now shape the protocol:
+
+- **A freshly linked binary measures slow.** The first two or three runs after a relink came in up to 60% slower than steady state — cold page-cache on the WSL2 DrvFS filesystem, paid by exactly one side of the A/B pair (the side that was just rebuilt). Since the cold side is always the *candidate*, the bias is at least conservative — it can only hide a win, not fabricate one — but it very nearly caused a false rejection. Every A/B batch now starts with a discarded warmup run per binary per dataset.
+- **Median-of-five cannot resolve ten percent on this machine.** Two runs of *identical* code, hours apart, produced per-task medians 40% apart in both directions. For any effect under ~10% the decision statistic is now the geometric mean of *within-pair* ratios across at least twelve interleaved pairs — each pair is measured close enough in time that the thermal drift cancels inside it — with the pairwise win count as a sanity check, and the in-pair order alternated (base-first on odd pairs, candidate-first on even) so that even the drift *within* a pair has no preferred side. The first round's interleaving advice was necessary but, for effects this small on hardware this noisy, not sufficient.
+
+### Net effect of the round
+
+The accepted set — the one-sided fringe walks, the branchless top-K merge, and the max-subarray operation changes — measured as one final interleaved comparison against the pre-round binary, on all eight main datasets (average mode; geometric mean of within-pair ratios, the two noisiest cells re-run at twelve alternating pairs):
+
+| Task | point | range |
+| --- | ---: | ---: |
+| Sum | 1.01× | **~1.18×** |
+| Max | 1.02× | **1.48×** |
+| Max-subarray sum | ~1.05× | **1.33×** |
+| Order statistic (K=16) | **1.15×** | **1.23×** |
+
+The point flavors of sum and max are untouched by construction (they run the fat/point engines, whose code this round did not change) and duly measure as noise — a useful negative control for the protocol itself. Every range cell improves, the cheap operations the most, and the order-statistic point cell gets its branchless merge. The pre-round tables above ([per-operation](#per-operation-latency-barrier-separated) and [throughput](#aggregate-throughput-no-barriers)) still show the older binary's numbers; re-measuring them wholesale on quiet hardware is left for the next full benchmarking session.
 
 ## Ensuring code quality
 
