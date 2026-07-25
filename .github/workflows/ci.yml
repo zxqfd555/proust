@@ -1,0 +1,142 @@
+# CI pipeline: unit tests under sanitizers (GCC + Clang), an optimized Release
+# build with the same test suite, a benchmark smoke run, and an MSVC build.
+#
+# The Linux jobs go through the repo Makefile (see its header) so CI exercises
+# the exact commands documented for local development. The Windows job drives
+# Conan/CMake directly because the Makefile is POSIX-only.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests / ${{ matrix.compiler.name }} (Debug + sanitizers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler:
+          - { name: GCC, cc: gcc, cxx: g++ }
+          - { name: Clang, cc: clang, cxx: clang++ }
+    env:
+      CC: ${{ matrix.compiler.cc }}
+      CXX: ${{ matrix.compiler.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Conan
+        run: pip install "conan>=2,<3"
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2/p
+          key: conan-${{ runner.os }}-${{ matrix.compiler.cc }}-debug-${{ hashFiles('conanfile.txt') }}
+
+      - name: Detect Conan profile
+        run: conan profile detect --force
+
+      # ASan's shadow memory layout conflicts with the high-entropy ASLR that
+      # recent Ubuntu kernels default to; 28 bits is the documented workaround.
+      - name: Lower ASLR entropy for sanitizers
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Build and run tests
+        run: make test
+
+  release:
+    name: Release build + tests + benchmark smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Conan
+        run: pip install "conan>=2,<3"
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2/p
+          key: conan-${{ runner.os }}-gcc-release-${{ hashFiles('conanfile.txt') }}
+
+      - name: Detect Conan profile
+        run: conan profile detect --force
+
+      # The tests target carries sanitizer flags in every configuration, so the
+      # Release test run needs the same ASLR workaround as the Debug one.
+      - name: Lower ASLR entropy for sanitizers
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Build Release
+        run: make release
+
+      - name: Run tests (Release)
+        run: ctest --test-dir build/Release/tests --output-on-failure -j$(nproc)
+
+      # Not a performance measurement (shared runners are too noisy for that) —
+      # only a check that the dataset generation + replay pipeline from the
+      # README works end to end.
+      - name: Benchmark smoke, generate dataset
+        run: >
+          ./build/Release/benchmarks/generate_dataset
+          --dataset-file smoke.dataset
+          --dataset-type SumInt32
+          --length 4096
+          --query-count 5000
+          --generator-type Range
+
+      - name: Benchmark smoke, replay dataset
+        run: >
+          ./build/Release/benchmarks/runner
+          --dataset-file smoke.dataset
+          --dataset-type SumInt32
+          --data-layout SoA
+          --node-topology preorder
+          --leaf-size-log 0
+          --generator-type Range
+          --measurement-mode average
+          --csv-file smoke.csv
+
+  windows:
+    name: Windows / MSVC (Release)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Conan
+        run: pip install "conan>=2,<3"
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2/p
+          key: conan-${{ runner.os }}-msvc-release-${{ hashFiles('conanfile.txt') }}
+
+      - name: Detect Conan profile
+        run: conan profile detect --force
+
+      - name: Install dependencies
+        run: conan install . -s build_type=Release -s compiler.cppstd=23 --build=missing
+
+      # MSVC uses a multi-config generator: a single configure preset
+      # (conan-default) and per-config build presets.
+      - name: Configure
+        run: cmake --preset conan-default
+
+      - name: Build
+        run: cmake --build --preset conan-release
+
+      - name: Run tests
+        run: ctest --test-dir build/tests -C Release --output-on-failure
