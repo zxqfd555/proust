@@ -7,14 +7,44 @@
 #include <memory>
 #include <vector>
 
+#if defined(_MSC_VER) && !defined(__clang__)
+    #include <immintrin.h>
+#endif
+
 #include "../interface.h"
 #include "../operations.h"
 
 namespace NProust {
     namespace NAlgorithmicaDetail {
+#if defined(_MSC_VER) && !defined(__clang__)
+        // MSVC has no vector extensions, so the same 256-bit lane math is spelled with AVX2
+        // intrinsics; the emitted vpand / vpaddd / vpxor match the GCC/Clang lowering.
+        typedef __m256i TVec;
+
+        inline TVec Broadcast(const int32_t x) {
+            return _mm256_set1_epi32(x);
+        }
+        inline void AddMasked(TVec& node, const TVec& broadcast, const TVec& mask) {
+            node = _mm256_add_epi32(node, _mm256_and_si256(broadcast, mask));
+        }
+        inline void XorMasked(TVec& node, const TVec& broadcast, const TVec& mask) {
+            node = _mm256_xor_si256(node, _mm256_and_si256(broadcast, mask));
+        }
+#else
         // 256-bit vector of eight int32 lanes, via GCC/Clang vector extensions — the exact
         // type the reference uses. AVX2 lowers `&` and `+` to vpand / vpaddd.
         typedef int32_t TVec __attribute__((vector_size(32)));
+
+        inline TVec Broadcast(const int32_t x) {
+            return x + TVec{};  // splat x across all eight lanes
+        }
+        inline void AddMasked(TVec& node, const TVec& broadcast, const TVec& mask) {
+            node += broadcast & mask;
+        }
+        inline void XorMasked(TVec& node, const TVec& broadcast, const TVec& mask) {
+            node ^= broadcast & mask;
+        }
+#endif
     } // namespace NAlgorithmicaDetail
 
     // A port of the "wide segment tree", the fastest structure in Sergey Slotin's
@@ -135,12 +165,12 @@ namespace NProust {
         // that covers k, using the precomputed mask and an AVX2 masked add.
         void Add(int k, const int32_t x) {
             using NAlgorithmicaDetail::TVec;
-            const TVec broadcast = x + TVec{};  // splat x across all eight lanes
+            const TVec broadcast = NAlgorithmicaDetail::Broadcast(x);
             for (int layer = 0; layer < H; ++layer) {
                 auto* node = reinterpret_cast<TVec*>(&Tree[Offsets[layer] + RoundDownToBlock(k)]);
                 auto* mask = reinterpret_cast<TVec*>(&Mask[k & (B - 1)][0]);
                 for (int i = 0; i < B / 8; ++i) {
-                    node[i] += broadcast & mask[i];
+                    NAlgorithmicaDetail::AddMasked(node[i], broadcast, mask[i]);
                 }
                 k >>= BLog;
             }
@@ -254,12 +284,12 @@ namespace NProust {
         // Fold `x` into element `k`: masked vector XOR over the suffix of one node per layer.
         void Apply(int k, const int32_t x) {
             using NAlgorithmicaDetail::TVec;
-            const TVec broadcast = x + TVec{};  // splat x across all eight lanes (bit pattern only)
+            const TVec broadcast = NAlgorithmicaDetail::Broadcast(x);  // bit pattern only
             for (int layer = 0; layer < H; ++layer) {
                 auto* node = reinterpret_cast<TVec*>(&Tree[Offsets[layer] + RoundDownToBlock(k)]);
                 auto* mask = reinterpret_cast<TVec*>(&Mask[k & (B - 1)][0]);
                 for (int i = 0; i < B / 8; ++i) {
-                    node[i] ^= broadcast & mask[i];
+                    NAlgorithmicaDetail::XorMasked(node[i], broadcast, mask[i]);
                 }
                 k >>= BLog;
             }
