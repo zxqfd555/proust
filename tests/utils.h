@@ -165,20 +165,29 @@ void StressTest(
     switch (testedEngine) {
         case (ETestedEngineType::RangeRobust): {
             baseGenerator = std::make_unique<NProust::TRangeUpdatePlanGenerator>(length);
-            rangeUpdateEngine = NProust::CreateRobustRangeUpdateEngine<TValue, TOperationResult, TOperation, TNodeTopology>();
+            // Named explicitly rather than built by the factory, which would substitute its own
+            // default for a dropped argument instead of failing the assertions below.
+            using TEngine = NProust::TRobustRangeUpdateEngine<TValue, TOperationResult, TOperation, TNodeTopology, TLayout>;
+            static_assert(std::is_same_v<typename TEngine::TNodeTopologyType, TNodeTopology>);
+            static_assert(std::is_same_v<typename TEngine::TLayoutType, TLayout>);
+            rangeUpdateEngine = std::make_unique<TEngine>();
             rangeUpdateEngine->Init(length);
             break;
         }
         case (ETestedEngineType::PointRobust): {
             baseGenerator = std::make_unique<NProust::TPointUpdatePlanGenerator>(length);
-            pointUpdateEngine = std::make_unique<NProust::TRobustPointUpdateEngine<TValue, TOperationResult, TOperation, LeafSizeLog>>();
+            using TEngine = NProust::TRobustPointUpdateEngine<TValue, TOperationResult, TOperation, LeafSizeLog>;
+            static_assert(TEngine::LeafSizeLogValue == LeafSizeLog);
+            pointUpdateEngine = std::make_unique<TEngine>();
             pointUpdateEngine->Init(length);
             break;
         }
         case (ETestedEngineType::Fat): {
             baseGenerator = std::make_unique<NProust::TPointUpdatePlanGenerator>(length);
             if constexpr (NProust::HasUndo<TOperation, TOperationResult>) {
-                pointUpdateEngine = std::make_unique<NProust::TFatPointUpdateEngine<TValue, TOperationResult, TOperation, BranchingLog>>();
+                using TEngine = NProust::TFatPointUpdateEngine<TValue, TOperationResult, TOperation, BranchingLog>;
+                static_assert(TEngine::BranchingLogValue == BranchingLog);
+                pointUpdateEngine = std::make_unique<TEngine>();
             } else {
                 spdlog::critical("The specified operation doesn't support Undo");
                 std::terminate();

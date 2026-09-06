@@ -49,9 +49,18 @@ namespace NProustExamples {
         }
     };
 
+    // The task modifies a single house at a time, so prefer the point engine over the range one.
+    inline std::unique_ptr<NProust::IPointUpdateEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation>> CreateLeetcodeHouseRobberPointEngine() {
+        return NProust::CreateRobustPointUpdateEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation>();
+    };
+
     inline std::unique_ptr<NProust::IRangeUpdateEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation>> CreateLeetcodeHouseRobberEngine() {
         return NProust::CreateRobustRangeUpdateEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation>();
     };
+
+    // Instantiate these directly to avoid the factories' indirect call per operation.
+    using THouseRobberPointEngine = NProust::TRobustPointUpdateEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation>;
+    using THouseRobberRangeEngine = NProust::TRobustRangeUpdateEngine<int32_t, THouseRobberDPState, THouseRobberDPStateOperation>;
 
     // Not really needed for the task, but used it in a unit test when comparing the result against a
     // brute-force solution.

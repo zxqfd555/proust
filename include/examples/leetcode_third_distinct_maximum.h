@@ -117,10 +117,22 @@ namespace NProustExamples {
         }
     };
 
+    // The task modifies one element at a time, so prefer the point engine over the range one.
+    template<size_t StatisticsRequired = 3>
+    inline std::unique_ptr<NProust::IPointUpdateEngine<int32_t, TTopKState<StatisticsRequired>, TInverseOrderStatisticOperation<StatisticsRequired>>> CreateInverseOrderStatisticsPointEngine() {
+        return NProust::CreateRobustPointUpdateEngine<int32_t, TTopKState<StatisticsRequired>, TInverseOrderStatisticOperation<StatisticsRequired>>();
+    };
+
     template<size_t StatisticsRequired = 3>
     inline std::unique_ptr<NProust::IRangeUpdateEngine<int32_t, TTopKState<StatisticsRequired>, TInverseOrderStatisticOperation<StatisticsRequired>>> CreateInverseOrderStatisticsEngine() {
         return NProust::CreateRobustRangeUpdateEngine<int32_t, TTopKState<StatisticsRequired>, TInverseOrderStatisticOperation<StatisticsRequired>>();
     };
+
+    // Instantiate these directly to avoid the factories' indirect call per operation.
+    template<size_t StatisticsRequired = 3>
+    using TInverseOrderStatisticsPointEngine = NProust::TRobustPointUpdateEngine<int32_t, TTopKState<StatisticsRequired>, TInverseOrderStatisticOperation<StatisticsRequired>>;
+    template<size_t StatisticsRequired = 3>
+    using TInverseOrderStatisticsRangeEngine = NProust::TRobustRangeUpdateEngine<int32_t, TTopKState<StatisticsRequired>, TInverseOrderStatisticOperation<StatisticsRequired>>;
 
     // A brute force solution to the inverse order statistic problem, with modifications.
     // An implementation of IEngine, adapted to be used as a dataset generator.

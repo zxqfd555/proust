@@ -53,9 +53,19 @@ namespace NProustExamples {
         static TOperationResult FromMany(const TValue* data, const size_t rangeStart, const size_t rangeEnd) noexcept;
     };
 
+    // The task modifies one element at a time, and for that the point engine is about twice as fast
+    // as the range one below; prefer it unless whole intervals get assigned.
+    inline std::unique_ptr<NProust::IPointUpdateEngine<int32_t, TMaxSumState, TMaxSumStateOperation>> CreateMaxSumPointEngine() {
+        return NProust::CreateRobustPointUpdateEngine<int32_t, TMaxSumState, TMaxSumStateOperation>();
+    };
+
     inline std::unique_ptr<NProust::IRangeUpdateEngine<int32_t, TMaxSumState, TMaxSumStateOperation>> CreateMaxSumEngine() {
         return NProust::CreateRobustRangeUpdateEngine<int32_t, TMaxSumState, TMaxSumStateOperation>();
     };
+
+    // Instantiate these directly to avoid the factories' indirect call per operation.
+    using TMaxSumPointEngine = NProust::TRobustPointUpdateEngine<int32_t, TMaxSumState, TMaxSumStateOperation>;
+    using TMaxSumRangeEngine = NProust::TRobustRangeUpdateEngine<int32_t, TMaxSumState, TMaxSumStateOperation>;
 
     // Not really needed for the task, but used it in a unit test when comparing the result against a
     // brute-force solution.

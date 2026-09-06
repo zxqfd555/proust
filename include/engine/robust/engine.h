@@ -5,8 +5,6 @@
 #include <vector>
 #include <optional>
 
-#include <spdlog/spdlog.h>
-
 #include "../interface.h"
 #include "layout.h"
 #include "topology.h"
@@ -19,7 +17,9 @@ namespace NProust {
         // Heap topology keeps siblings adjacent (rightChild = leftChild + 1), so the merge-up on
         // SetRange reads one cache line instead of a far-away one -- ~25% faster on the hot path
         // than preorder (measured). This also matches the default of CreateRobustRangeUpdateEngine.
-        NodeTopology TNodeTopology = TBinaryHeapNodeTopology<0>,
+        // The leaf size is 32 rather than 1: swept over every operation and both query shapes, it is
+        // the best or within noise of it everywhere, while a size-one leaf is 1.1-2.1x slower.
+        NodeTopology TNodeTopology = TBinaryHeapNodeTopology<5>,
         typename TLayout = TSoALayout<TValue, TOperationResult, std::nullopt>
     >
     requires DataLayout<TLayout, TValue, TOperationResult>
@@ -28,6 +28,9 @@ namespace NProust {
         const size_t ROOT_NODE_ID = 0;
 
     public:
+        using TNodeTopologyType = TNodeTopology;
+        using TLayoutType = TLayout;
+
         virtual void Init(const size_t length) override {
             Nodes.ReserveCapacities(TNodeTopology::CapacityToReserve(length));
             if (TNodeTopology::IsLeaf(2)) {
@@ -366,7 +369,7 @@ namespace NProust {
         typename TValue,
         typename TOperationResult,
         typename TOperation,
-        NodeTopology TNodeTopology = TBinaryHeapNodeTopology<0>,
+        NodeTopology TNodeTopology = TBinaryHeapNodeTopology<5>,
         typename TLayout = TSoALayout<TValue, TOperationResult>
     >
     requires DataLayout<TLayout, TValue, TOperationResult>
@@ -374,7 +377,8 @@ namespace NProust {
         return std::make_unique<TRobustRangeUpdateEngine<TValue, TOperationResult, TOperation, TNodeTopology, TLayout>>();
     }
 
-    template<typename TValue, typename TOperationResult, typename TOperation, size_t BranchingLog = 1>
+    // A 16-way node is one cache line of int32 prefixes; swept from 1 to 6, the optimum is 3-4.
+    template<typename TValue, typename TOperationResult, typename TOperation, size_t BranchingLog = 4>
     requires ValidOperation<TOperation, TValue, TOperationResult> && HasUndo<TOperation, TOperationResult>
     class TFatPointUpdateEngine final : public IPointUpdateEngine<TValue, TOperationResult, TOperation> {
     private:
@@ -384,6 +388,8 @@ namespace NProust {
         static constexpr size_t LEFTMOST_CHILD_INDEX = BranchingLog == 1 ? 0 : 2;
 
     public:
+        static constexpr size_t BranchingLogValue = BranchingLog;
+
         static_assert(BranchingLog > 0, "BranchingLog must be strictly positive");
 
         virtual void Init(const size_t length) override {
@@ -525,7 +531,8 @@ namespace NProust {
         }
     };
 
-    template<typename TValue, typename TOperationResult, typename TOperation, size_t LeafSizeLog = 1>
+    // Same optimum as the fat engine's branching, and kept equal to it: swept from 0 to 5, 3-4 wins.
+    template<typename TValue, typename TOperationResult, typename TOperation, size_t LeafSizeLog = 4>
     class TRobustPointUpdateEngine final : public IPointUpdateEngine<TValue, TOperationResult, TOperation> {
     private:
         // We use 1-indexing here: although not as nice, it allows us a bit cheaper topology operations
@@ -534,6 +541,8 @@ namespace NProust {
         static constexpr size_t LEAF_SIZE = 1 << LeafSizeLog;
     
     public:
+        static constexpr size_t LeafSizeLogValue = LeafSizeLog;
+
         virtual void Init(const size_t length) override {
             // Overbook capacities up to the closest power of two
             AllocatedLength = std::bit_ceil(length);
@@ -759,10 +768,13 @@ namespace NProust {
         }
     };
 
-    template<typename TValue, typename TOperationResult, typename TOperation, size_t LeafSizeLog = 0>
+    // LeafSizeLog is forwarded to whichever engine is picked -- as the fat tree's branching factor,
+    // or as the plain tree's leaf size. Both say how many elements one node covers.
+    template<typename TValue, typename TOperationResult, typename TOperation, size_t LeafSizeLog = 4>
     std::unique_ptr<IPointUpdateEngine<TValue, TOperationResult, TOperation>> CreateRobustPointUpdateEngine() {
         if constexpr (HasUndo<TOperation, TOperationResult>) {
-            return std::make_unique<TFatPointUpdateEngine<TValue, TOperationResult, TOperation, 4>>();
+            static_assert(LeafSizeLog > 0, "The fat point-update engine needs a leaf of at least two elements");
+            return std::make_unique<TFatPointUpdateEngine<TValue, TOperationResult, TOperation, LeafSizeLog>>();
         } else {
             return std::make_unique<TRobustPointUpdateEngine<TValue, TOperationResult, TOperation, LeafSizeLog>>();
         }
