@@ -145,3 +145,7 @@ TEST(PointUpdateEngine, AsymmetricIntSumWithUndoAndFromMany) {
     TestPointUpdateEngineExhaustively<TAsymmetricIntWrapper, int64_t, TAsymmetricIntWrapperOperationWithUndoAndFromMany>(CreateAsymmetricIntGenerator(-1000, 1000));
 }
 
+
+TEST(PointUpdateEngine, NonCommutativeAffineComposition) {
+    TestPointUpdateEngineExhaustively<TAffineMap, TAffineMap, TAffineCompositionOperation>(CreateAffineMapGenerator());
+}

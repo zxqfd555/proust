@@ -84,3 +84,35 @@ TEST(FatEngine, AsymmetricIntSumWithUndo) {
 TEST(FatEngine, AsymmetricIntSumWithFromMany) {
     TestFatEngineExhaustively<TAsymmetricIntWrapper, int64_t, TAsymmetricIntWrapperOperationWithUndoAndFromMany>(CreateAsymmetricIntGenerator(-1000, 1000));
 }
+
+// Composition of affine maps is a group but not commutative: an update has to be conjugated by the
+// prefix in front of it on every level.
+TEST(FatEngine, NonCommutativeAffineComposition) {
+    TestFatEngineExhaustively<TAffineMap, TAffineMap, TAffineCompositionOperation>(CreateAffineMapGenerator());
+}
+
+// The control: the same maps through the commutative fast path give wrong answers, so the test above
+// does exercise what the conjugation is for.
+TEST(FatEngine, AffineCompositionDeclaredCommutativeIsWrong) {
+    using TOperation = TAffineCompositionOperationDeclaredCommutative;
+    std::mt19937 generator(7);
+    const auto valueGenerator = CreateAffineMapGenerator();
+    std::vector<TAffineMap> values(200);
+    for (auto& value : values) {
+        value = valueGenerator(generator);
+    }
+    NProust::TFatPointUpdateEngine<TAffineMap, TAffineMap, TOperation, 2> engine;
+    engine.InitFrom(values);
+    size_t mismatches = 0;
+    for (size_t step = 0; step < 50; ++step) {
+        const size_t position = generator() % values.size();
+        values[position] = valueGenerator(generator);
+        engine.SetPoint(position, values[position]);
+        auto expected = TOperation::FromRepeated<TAffineMap, TAffineMap>(values[0], 1);
+        for (size_t index = 1; index < values.size(); ++index) {
+            expected = TOperation::Merge(expected, TOperation::FromRepeated<TAffineMap, TAffineMap>(values[index], 1));
+        }
+        mismatches += !(engine.ComputeRange(0, values.size()) == expected);
+    }
+    EXPECT_GT(mismatches, 0u);
+}

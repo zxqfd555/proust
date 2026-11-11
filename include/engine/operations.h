@@ -116,6 +116,8 @@ namespace NProust {
     } // namespace NOpDetail
 
     struct TSumOperation {
+        static constexpr bool IsCommutative = true;
+
 #if defined(PROUST_HAS_FOLD_IN_BLOCK_AVX2) && defined(__AVX2__)
         template<typename TOperationResult>
         requires std::is_same_v<TOperationResult, int32_t>
@@ -182,6 +184,8 @@ namespace NProust {
     };
 
     struct TBitwiseAndOperation {
+        static constexpr bool IsCommutative = true;
+
         template<typename TValue, typename TOperationResult>
         PROUST_FORCE_INLINE static TOperationResult FromRepeated(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v))) {
             return TOperationResult(v);
@@ -194,6 +198,8 @@ namespace NProust {
     };
 
     struct TBitwiseOrOperation {
+        static constexpr bool IsCommutative = true;
+
         template<typename TValue, typename TOperationResult>
         PROUST_FORCE_INLINE static TOperationResult FromRepeated(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v))) {
             return TOperationResult(v);
@@ -206,6 +212,8 @@ namespace NProust {
     };
 
     struct TBitwiseXorOperation {
+        static constexpr bool IsCommutative = true;
+
         template<typename TValue, typename TOperationResult>
         PROUST_FORCE_INLINE static TOperationResult FromRepeated(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v)) && noexcept(TOperationResult(0))) {
             return (times & 1) ? TOperationResult(v) : TOperationResult(0);
@@ -231,6 +239,8 @@ namespace NProust {
     };
 
     struct TMaxOperation {
+        static constexpr bool IsCommutative = true;
+
 #if defined(PROUST_HAS_FOLD_IN_BLOCK_AVX2) && defined(__AVX2__)
         template<typename TOperationResult>
         requires std::is_same_v<TOperationResult, int32_t>
@@ -251,6 +261,8 @@ namespace NProust {
     };
 
     struct TMinOperation {
+        static constexpr bool IsCommutative = true;
+
         template<typename TValue, typename TOperationResult>
         PROUST_FORCE_INLINE static TOperationResult FromRepeated(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v))) {
             return TOperationResult(v);
@@ -266,6 +278,8 @@ namespace NProust {
     // it exercises the non-Undo point engine. The merge is a Euclid loop -- the per-node work here is
     // a real computation, unlike the single instruction of sum/max/and/or.
     struct TGcdOperation {
+        static constexpr bool IsCommutative = true;
+
         template<typename TValue, typename TOperationResult>
         PROUST_FORCE_INLINE static TOperationResult FromRepeated(const TValue& v, const size_t times) noexcept {
             return TOperationResult(v);

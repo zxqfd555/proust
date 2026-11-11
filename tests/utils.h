@@ -121,6 +121,83 @@ struct TAsymmetricIntWrapperOperationWithUndoAndFromMany {
     }
 };
 
+// A non-commutative group: the maps x -> A x + B modulo a prime, A non-zero, merged as `lhs` first,
+// then `rhs`. The default element is the identity map, the only one the engines may build on their own.
+struct TAffineMap {
+    uint32_t A = 1;
+    uint32_t B = 0;
+};
+
+inline bool operator==(const TAffineMap& lhs, const TAffineMap& rhs) {
+    return lhs.A == rhs.A && lhs.B == rhs.B;
+}
+
+inline std::ostream& operator<<(std::ostream& stream, const TAffineMap& map) {
+    return stream << "(" << map.A << " x + " << map.B << ")";
+}
+
+template<bool DeclaredCommutative>
+struct TAffineCompositionOperationBase {
+    static constexpr uint64_t MOD = 998244353;
+
+    template<typename TOperationResult>
+    static TOperationResult Merge(const TOperationResult& lhs, const TOperationResult& rhs) noexcept {
+        return {
+            static_cast<uint32_t>(uint64_t(lhs.A) * rhs.A % MOD),
+            static_cast<uint32_t>((uint64_t(rhs.A) * lhs.B + rhs.B) % MOD),
+        };
+    }
+
+    template<typename TValue, typename TOperationResult>
+    static TOperationResult FromRepeated(const TValue& value, size_t times) noexcept {
+        TOperationResult result;
+        TOperationResult power = value;
+        for (; times; times >>= 1) {  // the powers of one map commute: the order does not matter
+            if (times & 1) {
+                result = Merge(result, power);
+            }
+            power = Merge(power, power);
+        }
+        return result;
+    }
+
+    // rhs^{-1}, then lhs.
+    template<typename TOperationResult>
+    static TOperationResult Undo(const TOperationResult& lhs, const TOperationResult& rhs) noexcept {
+        uint64_t inverse = 1;
+        uint64_t base = rhs.A;
+        for (uint64_t exponent = MOD - 2; exponent; exponent >>= 1) {
+            if (exponent & 1) {
+                inverse = inverse * base % MOD;
+            }
+            base = base * base % MOD;
+        }
+        const TOperationResult inverted{static_cast<uint32_t>(inverse), static_cast<uint32_t>((MOD - rhs.B) * inverse % MOD)};
+        return Merge(inverted, lhs);
+    }
+};
+
+using TAffineCompositionOperation = TAffineCompositionOperationBase<false>;
+
+// The same operation, wrongly declared commutative: the tests check that this is noticed, i.e. that
+// they exercise a non-commutative case at all.
+struct TAffineCompositionOperationDeclaredCommutative : TAffineCompositionOperationBase<true> {
+    static constexpr bool IsCommutative = true;
+};
+
+inline std::function<TAffineMap(std::mt19937&)> CreateAffineMapGenerator() {
+    return [](std::mt19937& generator) {
+        std::uniform_int_distribution<uint32_t> multiplier(1, TAffineCompositionOperation::MOD - 1);
+        std::uniform_int_distribution<uint32_t> shift(0, TAffineCompositionOperation::MOD - 1);
+        if (generator() % 8 == 0) {  // the edges too: identity-like and negating maps
+            static constexpr uint32_t EDGE_A[] = {1, 2, TAffineCompositionOperation::MOD - 1};
+            return TAffineMap{EDGE_A[generator() % 3], static_cast<uint32_t>(generator() % 2)};
+        }
+        const uint32_t a = multiplier(generator);
+        return TAffineMap{a, shift(generator)};
+    };
+}
+
 constexpr size_t N_QUERIES_IN_STRESS_TEST = 10000;
 
 template<typename TValue, typename TOperationResult, typename TOperation>

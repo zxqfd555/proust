@@ -29,9 +29,23 @@ namespace NProust {
         { TOperation::template FromMany<TOperationResult>(data, fromIndex, toIndex) } -> std::same_as<TOperationResult>;
     };
 
+    // Optional inverse of Merge, which makes the results a group: Undo(lhs, rhs) is the `x` with
+    // Merge(rhs, x) == lhs -- `lhs` with `rhs` taken off its front, as a range is a longer prefix with
+    // a shorter one taken off. For a commutative merge that is plain subtraction (or xor); for, say,
+    // the composition of invertible maps it is Merge(rhs^{-1}, lhs).
     template<typename TOperation, typename TOperationResult>
     concept HasUndo = requires(const TOperationResult& lhs, const TOperationResult& rhs) {
         { TOperation::template Undo<TOperationResult>(lhs, rhs) } -> std::same_as<TOperationResult>;
+    };
+
+    // Optional declaration that Merge is commutative: `static constexpr bool IsCommutative = true;`.
+    // An engine with Undo then folds a change of one element into every later prefix as the same
+    // delta, merged on either side. Without it the change has to be conjugated by the prefix in front
+    // of the element, level by level -- two more merges and an Undo per level, but correct for any
+    // group. Nothing is inferred: a commutative operation that does not say so is merely slower.
+    template<typename TOperation>
+    concept HasCommutativeMerge = requires {
+        requires TOperation::IsCommutative;
     };
 
     // Optional bulk modification hook. The engine sometimes needs to merge one `delta` into a whole

@@ -193,6 +193,11 @@ TEST(InitFrom, FatEngineAsymmetric) {
     TestFatEngineInitFrom<TAsymmetricIntWrapper, int32_t, TAsymmetricIntWrapperOperationWithUndoAndFromMany>(CreateAsymmetricIntGenerator(-100, 100));
 }
 
+TEST(InitFrom, NonCommutativeAffineComposition) {
+    TestPointEngineInitFrom<TAffineMap, TAffineMap, TAffineCompositionOperation>(CreateAffineMapGenerator());
+    TestFatEngineInitFrom<TAffineMap, TAffineMap, TAffineCompositionOperation>(CreateAffineMapGenerator());
+}
+
 // The interface's fallback (Init + one assignment per element) for engines without their own build.
 TEST(InitFrom, NaiveEngineFallback) {
     TestInitFrom<NProust::TNaiveRangeUpdateEngine<int32_t, TMaxSumState, TMaxSumStateOperation>, int32_t, TMaxSumState, TMaxSumStateOperation>(NProust::CreateRandomIntGenerator(-100, 100));

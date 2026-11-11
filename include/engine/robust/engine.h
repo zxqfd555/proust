@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "../interface.h"
+#include "../memory.h"
 #include "layout.h"
 #include "topology.h"
 
@@ -493,13 +494,26 @@ namespace NProust {
                 currentLayerStart -= chunks.size();
             }
         }
+        // The same optimization options as SetPointCommutative below, or GCC would not inline it here.
+#if defined(__GNUC__) && !defined(__clang__)
+        [[gnu::optimize("no-tree-vectorize")]]
+#endif
+        virtual void SetPoint(const size_t position, const TValue& value) override {
+            if constexpr (HasCommutativeMerge<TOperation>) {
+                SetPointCommutative(position, value);
+            } else {
+                SetPointConjugated(position, value);
+            }
+        }
+
+    private:
         // no-tree-vectorize is deliberate: the suffix loop below trips at most CHILDREN_COUNT - 1
         // times, and auto-vectorizing such a short map loop only pays head/tail overhead (measured
         // ~4% slower). The attribute keeps it the tight scalar pointer loop the bound below enables.
 #if defined(__GNUC__) && !defined(__clang__)
         [[gnu::optimize("no-tree-vectorize")]]
 #endif
-        virtual void SetPoint(const size_t position, const TValue& value) override {
+        void SetPointCommutative(const size_t position, const TValue& value) {
             const auto delta = TOperation::Undo(
                 TOperation::template FromRepeated<TValue, TOperationResult>(value, 1),
                 TOperation::template FromRepeated<TValue, TOperationResult>(PointValues[position], 1)
@@ -530,22 +544,72 @@ namespace NProust {
             }
         }
 
+        // Without a commutative merge: the element x in P = A x B (A in front of it, B after) becomes
+        // y, so P becomes A y B = (A y x^{-1} A^{-1}) P -- one change C, merged in front, for every
+        // later prefix in a group, but conjugated by the prefix A in front of the element. One level
+        // up, the changed node is a child, and its own slot is the prefix in front of it.
+        void SetPointConjugated(const size_t position, const TValue& value) {
+            const auto inverse = [this](const TOperationResult& x) {
+                return TOperation::Undo(NeutralValue, x);  // the x^{-1} with Merge(x, x^{-1}) neutral
+            };
+            const auto conjugate = [&inverse](const TOperationResult& prefix, const TOperationResult& change) {
+                return TOperation::Merge(TOperation::Merge(prefix, change), inverse(prefix));
+            };
+            const auto oldResult = TOperation::template FromRepeated<TValue, TOperationResult>(PointValues[position], 1);
+            const auto newResult = TOperation::template FromRepeated<TValue, TOperationResult>(value, 1);
+            auto change = TOperation::Merge(newResult, inverse(oldResult));
+            const size_t leafStart = position & ~(LeafSize - 1);
+            if (position > leafStart) {
+                change = conjugate(ComputeRangeBruteForce(leafStart, position), change);
+            }
+            PointValues[position] = value;
+
+            // As in SetPointCommutative, the root has no siblings and is never read.
+            auto currentNode = BottomLayerStart + (position >> LeafSizeLog);
+            while (currentNode > ROOT_NODE_ID) {
+                change = conjugate(NodeValues[currentNode], change);
+                const size_t groupStart = (currentNode - LEFTMOST_CHILD_INDEX) & ~(CHILDREN_COUNT - 1);
+                const size_t groupEnd = groupStart + LEFTMOST_CHILD_INDEX + CHILDREN_COUNT;
+                for (size_t index = currentNode + 1; index < groupEnd; ++index) {
+                    NodeValues[index] = TOperation::Merge(change, NodeValues[index]);
+                }
+                currentNode = (currentNode + INDEX_SHIFT_FOR_PARENT_CALCULATION) >> BranchingLog;
+            }
+        }
+
+    public:
         virtual TOperationResult ComputeRange(const size_t rangeStart, const size_t rangeEnd) const {
             if (rangeStart + (CHILDREN_COUNT << 1) > rangeEnd) [[unlikely]] {
                 return ComputeRangeBruteForce(rangeStart, rangeEnd);
             }
 
-            const auto fullPrefix = ComputePrefixBackwards(rangeEnd);
             if (rangeStart == 0) [[unlikely]] {
-                return fullPrefix;
+                return ComputePrefixBackwards(rangeEnd);
             }
-            const auto partialPrefix = ComputePrefixBackwards(rangeStart);
-            return TOperation::Undo(fullPrefix, partialPrefix);
+
+            // Both prefixes at once, from the level above the leaves. Once the two walks reach the
+            // same node, everything above it is the same front T of both, and it cancels:
+            // Undo(T Xr, T Xl) = Xl^{-1} T^{-1} T Xr = Undo(Xr, Xl), for any group.
+            auto [right, rightNode] = PrefixBelowParent(rangeEnd);
+            auto [left, leftNode] = PrefixBelowParent(rangeStart);
+            while (leftNode != rightNode) {
+                right = TOperation::Merge(NodeValues[rightNode], right);
+                left = TOperation::Merge(NodeValues[leftNode], left);
+                rightNode = (rightNode + INDEX_SHIFT_FOR_PARENT_CALCULATION) >> BranchingLog;
+                leftNode = (leftNode + INDEX_SHIFT_FOR_PARENT_CALCULATION) >> BranchingLog;
+            }
+            return TOperation::Undo(right, left);
         }
 
     private:
+#ifndef PROUST_NO_HUGE_PAGES
+        std::vector<TOperationResult, THugePageAllocator<TOperationResult>> NodeValues;
+        std::vector<TValue, THugePageAllocator<TValue>> PointValues;
+#else
         std::vector<TOperationResult> NodeValues;
         std::vector<TValue> PointValues;
+#endif
+        TOperationResult NeutralValue{};
         size_t AllocatedLength = 0;
         size_t LeafSize = 0;
         size_t LeafSizeLog = 0;
@@ -582,6 +646,7 @@ namespace NProust {
             assert((1 << LeafSizeLog) == LeafSize);
             NodeValues.resize(totalNodes + 1);  // +1 for 1-indexing
             BottomLayerStart = NodeValues.size() - (AllocatedLength >> LeafSizeLog);
+            NeutralValue = Neutral();
         }
 
         static TOperationResult Neutral() {
@@ -613,6 +678,22 @@ namespace NProust {
                 }
             }
             return ComputeRangeBruteForce(rangeStart, rangeEnd);
+        }
+
+        struct TPartialPrefix {
+            TOperationResult Value;
+            size_t Node;  // the next node of the walk up, a node of the layer above the leaves
+        };
+
+        // The part of the prefix below the layer above the leaves: the elements in front of it in its
+        // leaf, and the leaf's slot. Only for prefixes in a tree of at least two leaves.
+        PROUST_FORCE_INLINE TPartialPrefix PrefixBelowParent(const size_t prefix) const {
+            const size_t node = BottomLayerStart + (prefix >> LeafSizeLog);
+            const size_t parent = (node + INDEX_SHIFT_FOR_PARENT_CALCULATION) >> BranchingLog;
+            if (prefix & (LeafSize - 1)) [[likely]] {
+                return {TOperation::Merge(NodeValues[node], ComputeRangeInLeaf(prefix & ~(LeafSize - 1), prefix)), parent};
+            }
+            return {NodeValues[node], parent};
         }
 
         inline TOperationResult ComputePrefixBackwards(const size_t prefix) const {
@@ -713,8 +794,9 @@ namespace NProust {
             if constexpr (LeafSizeLog == 0) {
                 // The leaf-group is a single element; just overwrite its result.
                 NodeValues[node] = TOperation::template FromRepeated<TValue, TOperationResult>(value, 1);
-            } else if constexpr (HasUndo<TOperation, TOperationResult>) {
-                // Fold the old element out of the group and the new one in, in O(1).
+            } else if constexpr (HasUndo<TOperation, TOperationResult> && HasCommutativeMerge<TOperation>) {
+                // Fold the old element out of the group and the new one in, in O(1). Only with a
+                // commutative merge: the element sits in the middle of the group, not at its front.
                 const auto undone = TOperation::Undo(NodeValues[node], TOperation::template FromRepeated<TValue, TOperationResult>(oldValue, 1));
                 NodeValues[node] = TOperation::Merge(undone, TOperation::template FromRepeated<TValue, TOperationResult>(value, 1));
             } else {

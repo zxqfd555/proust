@@ -19,6 +19,7 @@ In brief, the main lines are:
 - [Interfaces](#interfaces)
 - [Optional operation extensions](#optional-operation-extensions)
   - [Undo (HasUndo)](#undo-hasundo)
+  - [Commutativity (HasCommutativeMerge)](#commutativity-hascommutativemerge)
   - [FromMany (HasFromMany)](#frommany-hasfrommany)
     - [SIMD discussion](#simd-discussion)
   - [ApplyToMany (HasApplyToMany)](#applytomany-hasapplytomany)
@@ -62,7 +63,9 @@ In brief, the main lines are:
   - [The same hook in the point engines: a trade-off](#the-same-hook-in-the-point-engines-a-trade-off)
   - [Building from an array](#building-from-an-array)
   - [Rejected in this round](#rejected-in-this-round)
+- [A fourth round: back from point set range composite](#a-fourth-round-back-from-point-set-range-composite)
 - [Library Checker: Range Set Range Composite](#library-checker-range-set-range-composite)
+- [Library Checker: Point Set Range Composite](#library-checker-point-set-range-composite)
 - [Ensuring code quality](#ensuring-code-quality)
 - [Building and Dependencies](#building-and-dependencies)
 
@@ -163,7 +166,7 @@ The design decision here is still to heavily prefer templates over virtual metho
 
 The `ValidOperation` concept above is the mandatory minimum: every operation must provide *Repeat* (`FromRepeated`) and *Merge*, and with just those two the engine is already correct and complete. On top of that baseline, the engine recognizes two **optional** capabilities. Neither is required; each, when an operation happens to provide it, unlocks a faster path, and an operation that lacks it simply stays on the generic one. The detection is done with concepts and `if constexpr`, so it costs nothing at runtime and adds no virtual dispatch — an operation that doesn't expose a capability never pays for its absence.
 
-There are five of them, addressing different places where the generic path leaves performance on the table: the *query strategy* on point-update engines (`Undo`), the *leaf work* at the bottom of any engine (`FromMany`), the *bulk in-place modification* a wide point-update engine performs on every update (`ApplyToMany`), and two hooks for the work on a 16-element block that the [wide range engine](#the-wide-engine) and the point engines do: the merge of a *whole* block (`MergeBlock`) and of a *part* of one (`FoldInBlock`). They are independent, and a given operation may expose any subset of them — the integer sum, for instance, exposes all three.
+There are five of them (plus a declaration of [commutativity](#commutativity-hascommutativemerge) that goes with `Undo`), addressing different places where the generic path leaves performance on the table: the *query strategy* on point-update engines (`Undo`), the *leaf work* at the bottom of any engine (`FromMany`), the *bulk in-place modification* a wide point-update engine performs on every update (`ApplyToMany`), and two hooks for the work on a 16-element block that the [wide range engine](#the-wide-engine) and the point engines do: the merge of a *whole* block (`MergeBlock`) and of a *part* of one (`FoldInBlock`). They are independent, and a given operation may expose any subset of them — the integer sum, for instance, exposes all three.
 
 ### Undo (HasUndo)
 
@@ -174,9 +177,20 @@ concept HasUndo = requires(const TOperationResult& lhs, const TOperationResult& 
 };
 ```
 
-`Undo` is an inverse of `Merge`: given an aggregate and the contribution of one part of it, it recovers the rest. For the sum it is plain subtraction (`Undo(a, b) = a - b`); for xor it is xor again. Many operations have no such inverse at all — you cannot meaningfully "subtract" a maximum, a maximum-subarray state, or a set of order statistics out of an aggregate, since the information needed to do so was discarded by the merge.
+`Undo` is an inverse of `Merge`: given an aggregate and the contribution of one part of it, it recovers the rest. Precisely, `Undo(lhs, rhs)` is the `x` with `Merge(rhs, x) == lhs` — `lhs` with `rhs` taken off its *front*, the way a range is a longer prefix with a shorter one taken off. For the sum it is plain subtraction (`Undo(a, b) = a - b`); for xor it is xor again; for the composition of invertible maps it is `rhs⁻¹` followed by `lhs`. Many operations have no such inverse at all — you cannot meaningfully "subtract" a maximum, a maximum-subarray state, or a set of order statistics out of an aggregate, since the information needed to do so was discarded by the merge.
 
 When the inverse is available, the single-point engines answer a range query as the difference of two prefixes, `Undo(prefix(r), prefix(l))`, walking one root-to-leaf path instead of assembling the `O(log N)` canonical nodes that tile the range. It is also the hard requirement of the Fenwick-style `TFatPointUpdateEngine`, which keeps running prefixes across wide nodes and therefore must be able to fold deltas in and back out. The point-update factory dispatches on precisely this concept: when `HasUndo` holds it hands back the fat, prefix-based engine; otherwise it falls back to the plain binary tree that tiles the range from canonical nodes. The mechanics of both are detailed in [Single point modifications](#single-point-modifications).
+
+### Commutativity (HasCommutativeMerge)
+
+```cpp
+template<typename TOperation>
+concept HasCommutativeMerge = requires {
+    requires TOperation::IsCommutative;
+};
+```
+
+Not a method but a declaration: `static constexpr bool IsCommutative = true;`. It matters only together with `Undo`. When an element changes, every later prefix changes too, and with a commutative merge they all change by the same delta, `Undo(new, old)`, merged on either side — one cheap pass over the sibling prefixes per level. Without commutativity that is simply wrong: in a prefix `A x B` the element `x` sits in the middle, and replacing it by `y` gives `A y B = (A y x⁻¹ A⁻¹) · A x B`. The change is still one value for all later prefixes of a group, but merged *in front* of them and *conjugated* by the prefix `A` in front of the element — and one level up, the changed node is itself a child, conjugated again by the slot in front of it. That costs two more merges and an `Undo` (for the inverse) per level, so an operation that does not declare commutativity gets the conjugating path: correct for any group (affine maps, matrices, permutations), and merely slower for a commutative operation that forgot to say so. Nothing is inferred, since a wrong guess would give wrong answers rather than slow ones. The built-in sum, xor, and, or, min, max and gcd declare it; the tests run the composition of affine maps modulo a prime through both point engines, plus a control that the same maps declared commutative do give wrong answers.
 
 ### FromMany (HasFromMany)
 
@@ -381,7 +395,7 @@ The way out is to make the tree wider and therefore shorter. `TFatPointUpdateEng
 
 Width is not free, of course. Recomputing a wide node from sixteen children is more work, and a prefix that ends in the middle of a node would, naively, require scanning its siblings. The "fat" engine pays for this in advance: each node stores a *running prefix* across its siblings, so that a prefix query reads one precomputed value per level rather than scanning a fan of children. This is exactly the idea behind a Fenwick tree, generalized to a wide, cache-conscious node. It does require the operation to be invertible, which is why the engine is constrained to operations that expose `Undo`.
 
-Concretely, an assignment computes the delta between the new and the old value (`Undo(new, old)`), writes the point, and folds that delta into the sibling prefixes along the path to the root. A range query is once again `Undo(prefix(end), prefix(start))`, with a brute-force fast path for ranges too short to be worth the machinery. A small detail in `Init` overbooks the capacity by one element, which lets the backward prefix walk avoid an extra bounds branch.
+Concretely, an assignment computes the delta between the new and the old value (`Undo(new, old)`), writes the point, and folds that delta into the sibling prefixes along the path to the root. That is for a [commutative](#commutativity-hascommutativemerge) operation; for any other group the delta is conjugated by the prefix in front of the element at each level and merged in front of the later prefixes. A range query is once again `Undo(prefix(end), prefix(start))`, with a brute-force fast path for ranges too short to be worth the machinery. A small detail in `Init` overbooks the capacity by one element, which lets the backward prefix walk avoid an extra bounds branch.
 
 This split is why the point-update factory dispatches on the operation: when an `Undo` is available it hands back the fat, Fenwick-style engine; otherwise it falls back to the plain binary tree with the branchless node-tiling traversal described above.
 
@@ -774,11 +788,31 @@ It is not free in isolation, though. With fences around every operation the pref
 - **Prefetching the paths of upcoming operations.** Unlike the [descent-time prefetch](#what-did-not-work) rejected before, this one ran ahead across operations: the runner read eight operations ahead and asked the engine to start loading the lowest levels of their paths. With the whole structure in L3 there was nothing for it to hide; cycles grew by 0.6-8% and instructions by 3-8%.
 - **Hand-tuned binary-engine descents** were put aside rather than rejected: the wide engine covers the cheap operations, where they would have mattered most.
 
+## A fourth round: back from point set range composite
+
+The [Library Checker solution](#library-checker-point-set-range-composite) of the point-update variant is the fat engine's idea taken to the end: an invertible operation, prefixes kept within 16-slot groups, a range as a quotient of two prefixes. Writing it brought three things back into the point engines.
+
+**Non-commutative groups.** The fat engine silently assumed a commutative merge: it folded `Undo(new, old)` into every later prefix as the same delta, merged on the right. That is wrong for, say, the composition of affine maps, though nothing in the concepts stopped such an operation from being plugged in. The contract of `Undo` is now written down (`Undo(lhs, rhs)` is the `x` with `Merge(rhs, x) == lhs`), and an operation [declares commutativity](#commutativity-hascommutativemerge) to keep the old path; any other group gets the delta conjugated by the prefix in front of the element on every level. The tests run the composition of affine maps modulo a prime through both point engines. For the operations that declare it, the compiled code is the same instruction for instruction, save the offsets of the engine's fields.
+
+**Queries that stop where the two prefixes meet.** The two prefixes of a query now climb together, and once they reach the same node, everything above it is the same front of both, which cancels in `Undo` for any group. Counted alone (a fat-engine benchmark of 10^7 random operations at a length of 10^6, outside the runner), queries take 6.6% fewer instructions and 3.4% fewer cycles, mixed streams 2.5% fewer cycles; updates, untouched, stay within 0.1%. The loop exit now depends on the data, which costs 0.06 branch misses per query, and the gain covers it.
+
+**Huge pages.** The large arrays of the fat engine come from `THugePageAllocator` (`include/engine/memory.h`): from 2 MB up, memory mapped on a 2 MB boundary and marked for transparent huge pages, which Linux grants in its common `madvise` mode (and in `always`) (`PROUST_NO_HUGE_PAGES` turns it off). In the same benchmark: queries -5.9% cycles, updates -5.1%, mixed -2.1%, last-level cache misses about -20%. The plain point engine showed no clear gain (+4%..-3% between runs) and keeps the standard allocator.
+
+Measured but not taken: interleaving independent chains in `InitFrom`, which the solution needed for its expensive modular merges. In the benchmarks here the build of the fat engine is dominated by the leaf folds of `FromMany`, already vectorized and independent, so there was nothing for it to win.
+
+A note on method: the runner turned out unsuitable for changes this small. It is one translation unit built with LTO, and an unrelated change of an engine moved the inlining of its dataset reader, changing the instruction count of the *untouched* max-point cell by 250 million (4%) in either direction. Such changes are measured with a standalone benchmark of the engine alone, built from both versions of the headers with the same flags and interleaved run by run.
+
 ## Library Checker: Range Set Range Composite
 
 `external-benchmarks/library-checker/range_set_range_composite/` holds a solution of [Range Set Range Composite](https://judge.yosupo.jp/problem/range_set_range_composite): assign a linear function `x -> c x + d` to a range, and evaluate the composition of the functions over a range at a point, modulo 998244353, for up to 5 * 10^5 elements and operations. It is a self-contained file built on the same ideas as the wide engine: a 16-ary tree whose nodes are written with masks; folds of a block in AVX2 lanes, with Montgomery arithmetic kept in [0, 2p) and one product per composition; per-assignment records of the powers f, f^2, f^4, ... built 16 at a time in SIMD lanes; and the paths of upcoming operations prefetched. `stress.sh` checks it against a brute force and an independent lazy segment tree.
 
 As of November 11, 2026, it is the fastest accepted solution of the problem on Library Checker: 122 ms on its slowest test ([submission 414997](https://judge.yosupo.jp/submission/414997)).
+
+## Library Checker: Point Set Range Composite
+
+`external-benchmarks/library-checker/point_set_range_composite/` holds a solution of [Point Set Range Composite](https://judge.yosupo.jp/problem/point_set_range_composite): set one linear function, and evaluate the composition over a range at a point, modulo 998244353. Affine maps with a non-zero multiplier form a group, so it keeps the inverses of prefixes in 16-slot groups on every level: a query is two prefixes walked only over the levels where its ends differ, an update conjugates its change level by level and writes the later slots of a group with masks in AVX2 lanes, and every division -- by the new multipliers, by the group products of the initial build, by the denominators of the answers -- is batched into a single exponentiation. `naive.cpp` and `reference.cpp` are the brute force and the plain segment tree it is checked against.
+
+As of November 11, 2026, it is the fastest accepted solution of the problem on Library Checker.
 
 ## Ensuring code quality
 
