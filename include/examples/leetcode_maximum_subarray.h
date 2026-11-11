@@ -3,8 +3,15 @@
 
 #pragma once
 
+#include <limits>
+
 #include "engine/robust/engine.h"
 #include "engine/operations.h"
+
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__)
+    #define PROUST_HAS_MAX_SUM_AVX2_BLOCK
+    #include <immintrin.h>
+#endif
 
 namespace NProustExamples {
     class TNaiveMaxSumEngine;
@@ -16,7 +23,59 @@ namespace NProustExamples {
         int32_t FullSum;
     };
 
+#ifdef PROUST_HAS_MAX_SUM_AVX2_BLOCK
+    namespace NMaxSumDetail {
+        // Merge for the two states in each 128-bit half of the arguments. A state's fields are
+        // {best, prefix, suffix, sum}, and all four results are "the larger of a sum and an old field":
+        //   best   = max(max(a.best, c.best), a.suffix + c.prefix)
+        //   prefix = max(a.prefix,            a.sum    + c.prefix)
+        //   suffix = max(c.suffix,            a.suffix + c.sum)
+        //   sum    = max(lowest,              a.sum    + c.sum)
+        [[gnu::target("avx2")]] inline __m256i MergePairs(const __m256i a, const __m256i c) noexcept {
+            const __m256i sums = _mm256_add_epi32(_mm256_shuffle_epi32(a, _MM_SHUFFLE(3, 2, 3, 2)), _mm256_shuffle_epi32(c, _MM_SHUFFLE(3, 3, 1, 1)));
+            __m256i kept = _mm256_max_epi32(a, c);
+            kept = _mm256_blend_epi32(kept, a, 0x22);
+            kept = _mm256_blend_epi32(kept, c, 0x44);
+            kept = _mm256_blend_epi32(kept, _mm256_set1_epi32(std::numeric_limits<int32_t>::min()), 0x88);
+            return _mm256_max_epi32(sums, kept);
+        }
+
+        // block[first] and block[first + 2] in one vector, block[first + 1] and block[first + 3] in the
+        // other: merging them gives the two merged neighbours in one vector.
+        [[gnu::target("avx2")]] inline __m256i MergeFour(const TMaxSumState* block) noexcept {
+            const auto load = [](const TMaxSumState* state) [[gnu::target("avx2")]] { return _mm_loadu_si128(reinterpret_cast<const __m128i*>(state)); };
+            return MergePairs(
+                _mm256_inserti128_si256(_mm256_castsi128_si256(load(block)), load(block + 2), 1),
+                _mm256_inserti128_si256(_mm256_castsi128_si256(load(block + 1)), load(block + 3), 1)
+            );
+        }
+
+        // Two vectors of two neighbouring states each (w, x), (y, z) -> the vector (w x, y z).
+        [[gnu::target("avx2")]] inline __m256i MergeTwoVectors(const __m256i first, const __m256i second) noexcept {
+            return MergePairs(_mm256_permute2x128_si256(first, second, 0x20), _mm256_permute2x128_si256(first, second, 0x31));
+        }
+
+        // 16 states in order: 16 -> 8 (in 4 vectors) -> 4 (in 2) -> 2 (in 1) -> 1.
+        [[gnu::target("avx2")]] inline TMaxSumState MergeBlockAvx2(const TMaxSumState* block) noexcept {
+            const __m256i low = MergeTwoVectors(MergeFour(block), MergeFour(block + 4));
+            const __m256i high = MergeTwoVectors(MergeFour(block + 8), MergeFour(block + 12));
+            const __m256i two = MergeTwoVectors(low, high);
+            const __m256i one = MergePairs(two, _mm256_permute2x128_si256(two, two, 0x01));
+            TMaxSumState result;
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(&result), _mm256_castsi256_si128(one));
+            return result;
+        }
+    } // namespace NMaxSumDetail
+#endif
+
     struct TMaxSumStateOperation {
+#if defined(PROUST_HAS_MAX_SUM_AVX2_BLOCK) && defined(__AVX2__)
+        template<typename TOperationResult>
+        static TOperationResult MergeBlock(const TOperationResult* block) noexcept {
+            return NMaxSumDetail::MergeBlockAvx2(block);
+        }
+#endif
+
         template<typename TValue, typename TOperationResult>
         static TOperationResult FromRepeated(const TValue& v, size_t times) noexcept {
             if constexpr (std::is_same_v<TValue, int32_t> && std::is_same_v<TOperationResult, TMaxSumState>) {

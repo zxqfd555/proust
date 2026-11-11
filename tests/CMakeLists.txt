@@ -19,9 +19,11 @@ add_executable(tests
     test_external_algorithmica.cpp
     test_external_fenwick.cpp
     test_fat_engine.cpp
+    test_init_from.cpp
     test_point_update_engine.cpp
     test_range_update_engine.cpp
     test_simple.cpp
+    test_wide_engine.cpp
 )
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")

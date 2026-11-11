@@ -3,6 +3,19 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
+
+// These operation primitives are one or two machine instructions each; they exist to be inlined
+// into the engine's hot loops. At -O3 GCC inlines the integer instantiations but, for reasons of
+// its cost model, leaves the floating-point ones out of line -- emitting a real `call` per element
+// in the point engine's update loop and the leaf reductions. Forcing the inline removes that call
+// overhead and lets the surrounding loop keep the value in a register. Integers are unaffected
+// (already inlined); the attribute simply makes the decision uniform across value types.
+#if defined(__GNUC__) || defined(__clang__)
+    #define PROUST_FORCE_INLINE [[gnu::always_inline]] inline
+#else
+    #define PROUST_FORCE_INLINE inline
+#endif
 
 namespace NProust {
     template<typename TOperation, typename TValue, typename TOperationResult>
@@ -36,6 +49,29 @@ namespace NProust {
         { TOperation::template ApplyToMany<TOperationResult>(block, count, from, delta) };
     };
 
+    // Optional hook of the wide engine: the merge of exactly 16 consecutive results, in order. That is
+    // the bulk of the work of an assignment there, and a fixed shape can be done in SIMD lanes; with no
+    // hook it is a chain of Merge. `block` is aligned to 64 bytes if the type allows.
+    //
+    // Contract: MergeBlock(block) must equal Merge(... Merge(block[0], block[1]) ..., block[15]).
+    template<typename TOperation, typename TOperationResult>
+    concept HasMergeBlock = requires(const TOperationResult* block) {
+        { TOperation::template MergeBlock<TOperationResult>(block) } -> std::same_as<TOperationResult>;
+    };
+
+    // Optional hook of the wide engine: the merge of the elements [from, to) of a 16-element block, for
+    // from < to; `TElement` is what the block holds, TOperationResult or TValue. A chain of Merge has a
+    // loop of data-dependent length, whose exit mispredicts on nearly every call, and such a flush also
+    // throws away the work in flight; an operation with a known neutral element can process the whole
+    // block in SIMD lanes under a mask instead, with no branch at all.
+    //
+    // Contract: FoldInBlock(block, from, to) must equal the chain of Merge over FromRepeated(block[i], 1)
+    // if TElement is TValue, or over block[i] itself if it is TOperationResult. All 16 elements may be read.
+    template<typename TOperation, typename TOperationResult, typename TElement>
+    concept HasFoldInBlock = requires(const TElement* block, size_t from, size_t to) {
+        { TOperation::template FoldInBlock<TOperationResult>(block, from, to) } -> std::same_as<TOperationResult>;
+    };
+
     template<class TOperationResult>
     class IQueryableEngine {
     public:
@@ -50,6 +86,16 @@ namespace NProust {
     class IRangeUpdateEngine: public IQueryableEngine<TOperationResult> {
     public:
         virtual void SetRange(const size_t left, const size_t right, const TValue& value) = 0;
+
+        // Init(values.size()) followed by assigning every element, but engines override it with an
+        // O(N) bottom-up build. The default is the O(N log N) fallback for those that do not.
+        virtual void InitFrom(std::span<const TValue> values) {
+            this->Init(values.size());
+            for (size_t index = 0; index < values.size(); ++index) {
+                SetRange(index, index + 1, values[index]);
+            }
+        }
+
         virtual ~IRangeUpdateEngine() = default;
     };
 
@@ -58,6 +104,15 @@ namespace NProust {
     class IPointUpdateEngine: public IQueryableEngine<TOperationResult> {
     public:
         virtual void SetPoint(const size_t position, const TValue& value) = 0;
+
+        // Same contract as IRangeUpdateEngine::InitFrom.
+        virtual void InitFrom(std::span<const TValue> values) {
+            this->Init(values.size());
+            for (size_t index = 0; index < values.size(); ++index) {
+                SetPoint(index, values[index]);
+            }
+        }
+
         virtual ~IPointUpdateEngine() = default;
     };
 } // namespace NProust

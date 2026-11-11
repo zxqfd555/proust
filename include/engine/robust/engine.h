@@ -1,9 +1,11 @@
 #pragma once
 
+#include <algorithm>
 #include <bit>
 #include <cassert>
-#include <vector>
 #include <optional>
+#include <span>
+#include <vector>
 
 #include "../interface.h"
 #include "layout.h"
@@ -35,11 +37,24 @@ namespace NProust {
             Nodes.ReserveCapacities(TNodeTopology::CapacityToReserve(length));
             if (TNodeTopology::IsLeaf(2)) {
                 // If the leaf size is one, there is no need for an extra allocation.
-                LazySnapshot.resize(length);
-                std::fill(LazySnapshot.begin(), LazySnapshot.end(), TValue());
+                LazySnapshot.assign(length, TValue());
             }
             AllocatedLength = length;
             InitNodes(ROOT_NODE_ID, 0, length);
+        }
+
+        virtual void InitFrom(std::span<const TValue> values) override {
+            if (values.empty()) [[unlikely]] {
+                Init(0);
+                return;
+            }
+
+            Nodes.ReserveCapacities(TNodeTopology::CapacityToReserve(values.size()));
+            if (TNodeTopology::IsLeaf(2)) {
+                LazySnapshot.assign(values.begin(), values.end());
+            }
+            AllocatedLength = values.size();
+            BuildNodes(ROOT_NODE_ID, 0, values.size(), values);
         }
 
         virtual void SetRange(const size_t rangeStart, const size_t rangeEnd, const TValue& value) override {
@@ -73,6 +88,30 @@ namespace NProust {
                 InitNodes(TNodeTopology::LeftChild(currentNodeId, rangeLength), nodeStart, midpoint);
                 InitNodes(TNodeTopology::RightChild(currentNodeId, rangeLength), midpoint, nodeEnd);
             }
+        }
+
+        // InitNodes for given values: O(N) in total, as every value is merged from the children's
+        // instead of being recomputed per element. A fat leaf is reduced from the snapshot exactly
+        // as a query over the whole leaf would be.
+        void BuildNodes(const size_t currentNodeId, const size_t nodeStart, const size_t nodeEnd, std::span<const TValue> values) {
+            Nodes.DropLazilyPropagated(currentNodeId);
+
+            const size_t rangeLength = nodeEnd - nodeStart;
+            if (TNodeTopology::IsLeaf(rangeLength)) {
+                if (TNodeTopology::IsLeaf(2)) {
+                    Nodes.SetSubtreeValue(currentNodeId, QueryLeaf(nodeStart, nodeEnd));
+                } else {
+                    Nodes.SetSubtreeValue(currentNodeId, TOperation::template FromRepeated<TValue, TOperationResult>(values[nodeStart], 1));
+                }
+                return;
+            }
+
+            const size_t midpoint = nodeStart + (rangeLength >> 1);
+            const size_t leftChildId = TNodeTopology::LeftChild(currentNodeId, rangeLength);
+            const size_t rightChildId = TNodeTopology::RightChild(currentNodeId, rangeLength);
+            BuildNodes(leftChildId, nodeStart, midpoint, values);
+            BuildNodes(rightChildId, midpoint, nodeEnd, values);
+            Nodes.SetSubtreeValue(currentNodeId, TOperation::Merge(Nodes.GetSubtreeValue(leftChildId), Nodes.GetSubtreeValue(rightChildId)));
         }
 
         // Out-of-line on purpose: see the call site in ModifyNodes. Rebuilds a (fat) leaf's subtree
@@ -393,39 +432,13 @@ namespace NProust {
         static_assert(BranchingLog > 0, "BranchingLog must be strictly positive");
 
         virtual void Init(const size_t length) override {
-            // Overbook capacities up to the closest power of two
-            // Here, length + 1 is used, in order to avoid branching in ComputePrefixBackwards
-            AllocatedLength = std::bit_ceil((length + 1));
-            if (AllocatedLength < CHILDREN_COUNT) {
-                AllocatedLength = CHILDREN_COUNT;
-            }
-
-            size_t totalNodes = 1;
-            size_t nodesInCurrentLayer = 1;
-            size_t nodesUnderOneLeaf = AllocatedLength;
-            while (nodesUnderOneLeaf > CHILDREN_COUNT) {
-                totalNodes += nodesInCurrentLayer <<= BranchingLog;
-                nodesUnderOneLeaf >>= BranchingLog;
-            }
-
-            LeafSize = nodesUnderOneLeaf;
-            LeafSizeLog = std::countr_zero(LeafSize);
-            assert((1 << LeafSizeLog) == LeafSize);
-            {
-                PointValues.resize(AllocatedLength);
-                std::fill(PointValues.begin(), PointValues.end(), TValue());
-            }
-
-            NodeValues.resize(totalNodes + 1);  // +1 for 1-indexing
-            BottomLayerStart = NodeValues.size() - (AllocatedLength >> LeafSizeLog);
+            AllocateGeometry(length);
+            PointValues.assign(AllocatedLength, TValue());
 
             size_t currentLayerStart = BottomLayerStart;
             size_t layerNodes = (AllocatedLength >> LeafSizeLog);
             size_t nodeCoverage = LeafSize;
-            const auto neutral = TOperation::Undo(
-                TOperation::template FromRepeated<TValue, TOperationResult>(TValue(), 1),
-                TOperation::template FromRepeated<TValue, TOperationResult>(TValue(), 1)
-            );
+            const auto neutral = Neutral();
             while (layerNodes > 1) {
                 for (size_t nodeIndex = currentLayerStart; nodeIndex < currentLayerStart + layerNodes; ++nodeIndex) {
                     const bool isLeftmost = (nodeIndex & (CHILDREN_COUNT - 1)) == LEFTMOST_CHILD_INDEX;
@@ -442,6 +455,44 @@ namespace NProust {
             }
         }
 
+        virtual void InitFrom(std::span<const TValue> values) override {
+            AllocateGeometry(values.size());
+            AssignPointValues(values);
+
+            // Bottom-up, one layer at a time. `chunks` holds the full value of every node of the
+            // current layer; the layer itself stores exclusive prefixes within each sibling group
+            // (see Init), and a group's total becomes its parent's chunk on the layer above.
+            const auto defaultLeaf = TOperation::template FromRepeated<TValue, TOperationResult>(TValue(), LeafSize);
+            std::vector<TOperationResult> chunks(AllocatedLength >> LeafSizeLog);
+            for (size_t leaf = 0; leaf < chunks.size(); ++leaf) {
+                const size_t leafStart = leaf << LeafSizeLog;
+                chunks[leaf] = leafStart < values.size() ? ComputeRangeBruteForce(leafStart, leafStart + LeafSize) : defaultLeaf;
+            }
+
+            const auto neutral = Neutral();
+            size_t currentLayerStart = BottomLayerStart;
+            std::vector<TOperationResult> parentChunks;
+            while (chunks.size() > 1) {
+                parentChunks.clear();
+                parentChunks.reserve(chunks.size() >> BranchingLog);
+                TOperationResult groupPrefix = neutral;
+                for (size_t index = 0; index < chunks.size(); ++index) {
+                    const size_t nodeIndex = currentLayerStart + index;
+                    if ((nodeIndex & (CHILDREN_COUNT - 1)) == LEFTMOST_CHILD_INDEX) {
+                        NodeValues[nodeIndex] = neutral;
+                        groupPrefix = chunks[index];
+                    } else {
+                        NodeValues[nodeIndex] = groupPrefix;
+                        groupPrefix = TOperation::Merge(groupPrefix, chunks[index]);
+                    }
+                    if (((nodeIndex + 1) & (CHILDREN_COUNT - 1)) == LEFTMOST_CHILD_INDEX) {
+                        parentChunks.push_back(groupPrefix);
+                    }
+                }
+                std::swap(chunks, parentChunks);
+                currentLayerStart -= chunks.size();
+            }
+        }
         // no-tree-vectorize is deliberate: the suffix loop below trips at most CHILDREN_COUNT - 1
         // times, and auto-vectorizing such a short map loop only pays head/tail overhead (measured
         // ~4% slower). The attribute keeps it the tight scalar pointer loop the bound below enables.
@@ -500,6 +551,46 @@ namespace NProust {
         size_t LeafSizeLog = 0;
         size_t BottomLayerStart = 0;
 
+        // The elements, then TValue() up to the allocated length: the array is written once, not
+        // zero-filled first. A separate method, since this array is the bulk of a build's memory.
+        void AssignPointValues(std::span<const TValue> values) {
+            PointValues.clear();
+            PointValues.reserve(AllocatedLength);
+            PointValues.insert(PointValues.end(), values.begin(), values.end());
+            PointValues.resize(AllocatedLength);
+        }
+
+        // Sizes the tree for `length` elements; the values and the node values are left to the caller.
+        void AllocateGeometry(const size_t length) {
+            // Overbook capacities up to the closest power of two
+            // Here, length + 1 is used, in order to avoid branching in ComputePrefixBackwards
+            AllocatedLength = std::bit_ceil((length + 1));
+            if (AllocatedLength < CHILDREN_COUNT) {
+                AllocatedLength = CHILDREN_COUNT;
+            }
+
+            size_t totalNodes = 1;
+            size_t nodesInCurrentLayer = 1;
+            size_t nodesUnderOneLeaf = AllocatedLength;
+            while (nodesUnderOneLeaf > CHILDREN_COUNT) {
+                totalNodes += nodesInCurrentLayer <<= BranchingLog;
+                nodesUnderOneLeaf >>= BranchingLog;
+            }
+
+            LeafSize = nodesUnderOneLeaf;
+            LeafSizeLog = std::countr_zero(LeafSize);
+            assert((1 << LeafSizeLog) == LeafSize);
+            NodeValues.resize(totalNodes + 1);  // +1 for 1-indexing
+            BottomLayerStart = NodeValues.size() - (AllocatedLength >> LeafSizeLog);
+        }
+
+        static TOperationResult Neutral() {
+            return TOperation::Undo(
+                TOperation::template FromRepeated<TValue, TOperationResult>(TValue(), 1),
+                TOperation::template FromRepeated<TValue, TOperationResult>(TValue(), 1)
+            );
+        }
+
         inline TOperationResult ComputeRangeBruteForce(const size_t rangeStart, const size_t rangeEnd) const {
             if constexpr (HasFromMany<TOperation, TValue, TOperationResult>) {
                 return TOperation::template FromMany<TOperationResult>(PointValues.data(), rangeStart, rangeEnd);
@@ -512,12 +603,24 @@ namespace NProust {
             }
         }
 
+        // [rangeStart, rangeEnd) inside one aligned block of 16 elements: with the hook, a fold with no
+        // loop of data-dependent length, whose exit branch would mispredict on nearly every query.
+        PROUST_FORCE_INLINE TOperationResult ComputeRangeInLeaf(const size_t rangeStart, const size_t rangeEnd) const {
+            if constexpr (HasFoldInBlock<TOperation, TOperationResult, TValue>) {
+                if (LeafSize == 16) {
+                    const size_t blockStart = rangeStart & ~size_t(15);
+                    return TOperation::template FoldInBlock<TOperationResult>(PointValues.data() + blockStart, rangeStart - blockStart, rangeEnd - blockStart);
+                }
+            }
+            return ComputeRangeBruteForce(rangeStart, rangeEnd);
+        }
+
         inline TOperationResult ComputePrefixBackwards(const size_t prefix) const {
             TOperationResult result;            
 
             size_t currentNode = BottomLayerStart + (prefix >> LeafSizeLog);
             if (prefix & (LeafSize - 1)) [[likely]] {
-                result = ComputeRangeBruteForce(prefix & ~(LeafSize - 1), prefix);
+                result = ComputeRangeInLeaf(prefix & ~(LeafSize - 1), prefix);
             } else {
                 result = NodeValues[currentNode];
                 currentNode = (currentNode + INDEX_SHIFT_FOR_PARENT_CALCULATION) >> BranchingLog;
@@ -559,13 +662,39 @@ namespace NProust {
             GroupCount = AllocatedLength >> LeafSizeLog;
             NodeValues.resize(GroupCount << 1);
 
-            PointValues.resize(AllocatedLength);
-            std::fill(PointValues.begin(), PointValues.end(), TValue());
+            PointValues.assign(AllocatedLength, TValue());
 
             // Initialize the leaf-group nodes with the state of LEAF_SIZE default values, then build
             // the tree above them.
             const auto defaultLeaf = TOperation::template FromRepeated<TValue, TOperationResult>(TValue(), LEAF_SIZE);
             std::fill(NodeValues.begin() + GroupCount, NodeValues.end(), defaultLeaf);
+            for (size_t index = GroupCount - 1; index >= 1; --index) {
+                NodeValues[index] = TOperation::Merge(NodeValues[(index << 1)], NodeValues[(index << 1) + 1]);
+            }
+        }
+
+        virtual void InitFrom(std::span<const TValue> values) override {
+            AllocatedLength = std::bit_ceil(values.size());
+            if (AllocatedLength < LEAF_SIZE) {
+                AllocatedLength = LEAF_SIZE;
+            }
+            GroupCount = AllocatedLength >> LeafSizeLog;
+            NodeValues.resize(GroupCount << 1);
+
+            // Written once, not zero-filled first: the elements, then TValue() up to the allocated length.
+            PointValues.clear();
+            PointValues.reserve(AllocatedLength);
+            PointValues.insert(PointValues.end(), values.begin(), values.end());
+            PointValues.resize(AllocatedLength);
+
+            // Groups holding real elements are reduced from them; the all-padding tail gets the
+            // same default leaf as in Init.
+            const size_t usedGroups = (values.size() + LEAF_SIZE - 1) >> LeafSizeLog;
+            for (size_t group = 0; group < usedGroups; ++group) {
+                NodeValues[GroupCount + group] = ComputeRangeBruteForce(group << LeafSizeLog, (group + 1) << LeafSizeLog);
+            }
+            const auto defaultLeaf = TOperation::template FromRepeated<TValue, TOperationResult>(TValue(), LEAF_SIZE);
+            std::fill(NodeValues.begin() + GroupCount + usedGroups, NodeValues.end(), defaultLeaf);
             for (size_t index = GroupCount - 1; index >= 1; --index) {
                 NodeValues[index] = TOperation::Merge(NodeValues[(index << 1)], NodeValues[(index << 1) + 1]);
             }
@@ -621,18 +750,18 @@ namespace NProust {
 
                 const auto centralResult = ComputeAlignedRange(alignedStart, alignedEnd);
                 if (alignedStart > rangeStart) [[likely]] {
-                    const auto leftOffcutResult = ComputeRangeBruteForce(rangeStart, alignedStart);
+                    const auto leftOffcutResult = ComputeRangeInLeaf(rangeStart, alignedStart);
                     const auto leftCenterResult = TOperation::Merge(leftOffcutResult, centralResult);
 
                     if (alignedEnd < rangeEnd) [[likely]] {
-                        const auto rightOffcutResult = ComputeRangeBruteForce(alignedEnd, rangeEnd);
+                        const auto rightOffcutResult = ComputeRangeInLeaf(alignedEnd, rangeEnd);
                         return TOperation::Merge(leftCenterResult, rightOffcutResult);
                     } else {
                         return leftCenterResult;
                     }
                 } else {
                     if (alignedEnd < rangeEnd) [[likely]] {
-                        const auto rightOffcutResult = ComputeRangeBruteForce(alignedEnd, rangeEnd);
+                        const auto rightOffcutResult = ComputeRangeInLeaf(alignedEnd, rangeEnd);
                         return TOperation::Merge(centralResult, rightOffcutResult);
                     } else {
                         return centralResult;
@@ -646,6 +775,18 @@ namespace NProust {
         std::vector<TValue> PointValues;
         size_t AllocatedLength;
         size_t GroupCount;  // = AllocatedLength >> LeafSizeLog; number of leaf-group nodes
+
+        // [rangeStart, rangeEnd) inside one aligned block of 16 elements: with the hook, a fold with no
+        // loop of data-dependent length, whose exit branch would mispredict on nearly every query.
+        PROUST_FORCE_INLINE TOperationResult ComputeRangeInLeaf(const size_t rangeStart, const size_t rangeEnd) const {
+            if constexpr (HasFoldInBlock<TOperation, TOperationResult, TValue>) {
+                if (LEAF_SIZE == 16) {
+                    const size_t blockStart = rangeStart & ~size_t(15);
+                    return TOperation::template FoldInBlock<TOperationResult>(PointValues.data() + blockStart, rangeStart - blockStart, rangeEnd - blockStart);
+                }
+            }
+            return ComputeRangeBruteForce(rangeStart, rangeEnd);
+        }
 
         inline TOperationResult ComputeRangeBruteForce(const size_t rangeStart, const size_t rangeEnd) const {
             assert(rangeStart < rangeEnd);
@@ -664,7 +805,7 @@ namespace NProust {
         inline TOperationResult ComputePrefixUnaligned(const size_t prefix) const {
             const auto alignedBorder = (prefix >> LeafSizeLog) << LeafSizeLog;
             if (alignedBorder == 0) [[unlikely]] {
-                return ComputeRangeBruteForce(0, prefix);
+                return ComputeRangeInLeaf(0, prefix);
             }
 
             const auto mainResult = ComputeRangeBackwards(GroupCount, alignedBorder >> LeafSizeLog);
@@ -675,7 +816,7 @@ namespace NProust {
             if (alignedBorder == prefix) [[unlikely]] {
                 return mainResult;
             }
-            return TOperation::Merge(mainResult, ComputeRangeBruteForce(alignedBorder, prefix));
+            return TOperation::Merge(mainResult, ComputeRangeInLeaf(alignedBorder, prefix));
         }
 
         inline TOperationResult ComputeAlignedRange(const size_t rangeStart, const size_t rangeEnd) const {

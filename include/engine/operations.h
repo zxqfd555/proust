@@ -1,27 +1,63 @@
 #pragma once
 
-// These operation primitives are one or two machine instructions each; they exist to be inlined
-// into the engine's hot loops. At -O3 GCC inlines the integer instantiations but, for reasons of
-// its cost model, leaves the floating-point ones out of line -- emitting a real `call` per element
-// in the point engine's update loop and the leaf reductions. Forcing the inline removes that call
-// overhead and lets the surrounding loop keep the value in a register. Integers are unaffected
-// (already inlined); the attribute simply makes the decision uniform across value types.
-#if defined(__GNUC__) || defined(__clang__)
-    #define PROUST_FORCE_INLINE [[gnu::always_inline]] inline
-#else
-    #define PROUST_FORCE_INLINE inline
-#endif
+#include "interface.h"
+
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <numeric>
 #include <type_traits>
-#if defined(__AVX2__)
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__)
+    #define PROUST_HAS_FOLD_IN_BLOCK_AVX2
+    #include <immintrin.h>
+#elif defined(__AVX2__)
     #include <immintrin.h>
 #endif
 
 namespace NProust {
     namespace NOpDetail {
+#ifdef PROUST_HAS_FOLD_IN_BLOCK_AVX2
+        // The int32 lanes [from, to) of a 16-lane block, the others replaced with `neutral`, in two vectors.
+        struct TBlockLanes {
+            __m256i Low;
+            __m256i High;
+        };
+
+        [[gnu::target("avx2")]] inline TBlockLanes MaskedBlockLanes(const int32_t* block, const size_t from, const size_t to, const int32_t neutral) noexcept {
+            const __m256i lanes = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+            const __m256i eight = _mm256_set1_epi32(8);
+            const __m256i before = _mm256_set1_epi32(static_cast<int>(from) - 1);
+            const __m256i end = _mm256_set1_epi32(static_cast<int>(to));
+            const __m256i lowMask = _mm256_and_si256(_mm256_cmpgt_epi32(lanes, before), _mm256_cmpgt_epi32(end, lanes));
+            const __m256i highLanes = _mm256_add_epi32(lanes, eight);
+            const __m256i highMask = _mm256_and_si256(_mm256_cmpgt_epi32(highLanes, before), _mm256_cmpgt_epi32(end, highLanes));
+            const __m256i filler = _mm256_set1_epi32(neutral);
+            return {
+                _mm256_blendv_epi8(filler, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(block)), lowMask),
+                _mm256_blendv_epi8(filler, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(block + 8)), highMask),
+            };
+        }
+
+        [[gnu::target("avx2")]] inline int32_t SumInBlockAvx2(const int32_t* block, const size_t from, const size_t to) noexcept {
+            const TBlockLanes lanes = MaskedBlockLanes(block, from, to, 0);
+            const __m256i sum = _mm256_add_epi32(lanes.Low, lanes.High);
+            __m128i folded = _mm_add_epi32(_mm256_castsi256_si128(sum), _mm256_extracti128_si256(sum, 1));
+            folded = _mm_add_epi32(folded, _mm_shuffle_epi32(folded, _MM_SHUFFLE(1, 0, 3, 2)));
+            folded = _mm_add_epi32(folded, _mm_shuffle_epi32(folded, _MM_SHUFFLE(2, 3, 0, 1)));
+            return _mm_cvtsi128_si32(folded);
+        }
+
+        [[gnu::target("avx2")]] inline int32_t MaxInBlockAvx2(const int32_t* block, const size_t from, const size_t to) noexcept {
+            const TBlockLanes lanes = MaskedBlockLanes(block, from, to, std::numeric_limits<int32_t>::min());
+            const __m256i largest = _mm256_max_epi32(lanes.Low, lanes.High);
+            __m128i folded = _mm_max_epi32(_mm256_castsi256_si128(largest), _mm256_extracti128_si256(largest, 1));
+            folded = _mm_max_epi32(folded, _mm_shuffle_epi32(folded, _MM_SHUFFLE(1, 0, 3, 2)));
+            folded = _mm_max_epi32(folded, _mm_shuffle_epi32(folded, _MM_SHUFFLE(2, 3, 0, 1)));
+            return _mm_cvtsi128_si32(folded);
+        }
+#endif
+
         // Masked in-place bulk update for ApplyToMany: block[i] = op(block[i], delta) for i in
         // [from, count); block[0..from) is read but left unchanged. Handles 16/32/64-bit integers
         // with one masked AVX2 op per 256-bit chunk (the Algorithmica wide-tree trick), so each
@@ -80,6 +116,14 @@ namespace NProust {
     } // namespace NOpDetail
 
     struct TSumOperation {
+#if defined(PROUST_HAS_FOLD_IN_BLOCK_AVX2) && defined(__AVX2__)
+        template<typename TOperationResult>
+        requires std::is_same_v<TOperationResult, int32_t>
+        PROUST_FORCE_INLINE static TOperationResult FoldInBlock(const int32_t* block, const size_t from, const size_t to) noexcept {
+            return NOpDetail::SumInBlockAvx2(block, from, to);
+        }
+#endif
+
         template<typename TValue, typename TOperationResult>
         PROUST_FORCE_INLINE static TOperationResult FromRepeated(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v * times))) {
             return TOperationResult(v * times);
@@ -187,6 +231,14 @@ namespace NProust {
     };
 
     struct TMaxOperation {
+#if defined(PROUST_HAS_FOLD_IN_BLOCK_AVX2) && defined(__AVX2__)
+        template<typename TOperationResult>
+        requires std::is_same_v<TOperationResult, int32_t>
+        PROUST_FORCE_INLINE static TOperationResult FoldInBlock(const int32_t* block, const size_t from, const size_t to) noexcept {
+            return NOpDetail::MaxInBlockAvx2(block, from, to);
+        }
+#endif
+
         template<typename TValue, typename TOperationResult>
         PROUST_FORCE_INLINE static TOperationResult FromRepeated(const TValue& v, const size_t times) noexcept(noexcept(TOperationResult(v))) {
             return TOperationResult(v);

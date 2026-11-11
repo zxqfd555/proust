@@ -14,6 +14,7 @@
 
 #include "common/dataset.h"
 #include "engine/robust/engine.h"
+#include "engine/wide/engine.h"
 #include "engine/external/fenwick.h"
 #include "engine/external/algorithmica.h"
 #include "engine/operations.h"
@@ -54,6 +55,7 @@ constexpr int32_t INT32_SENTINEL = std::numeric_limits<int32_t>::max();
 // engine. Both are valid only for the SumInt32 point-modification problem.
 constexpr std::string_view FENWICK_IMPLEMENTATION_NAME = "fenwick";
 constexpr std::string_view ALGORITHMICA_IMPLEMENTATION_NAME = "algorithmica";
+constexpr std::string_view WIDE_IMPLEMENTATION_NAME = "wide";
 
 // Two ways to time the replay.
 //   PerOperation brackets every operation in RDTSC fences, giving per-operation TSC histograms —
@@ -420,6 +422,14 @@ void LogProcessorInfo(int32_t pinnedCore) {
     spdlog::info("Execution pinned to core: {}", pinnedCore);
 }
 
+template<NProust::EBaseGeneratorType Kind, class TEngine, class TValue, class TOperationResult>
+void InitAndRunLoop(
+    std::unique_ptr<TEngine> engine,
+    NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer,
+    const TCsvContext& csvContext,
+    std::chrono::high_resolution_clock::time_point initStartedAt
+);
+
 template<class TValue, class TOperationResult, class TOperation, auto Sentinel = std::nullopt>
 void RunDatasetWithSettings(
     NProust::TStreamingDatasetReader<TValue, TOperationResult>& streamer,
@@ -429,6 +439,13 @@ void RunDatasetWithSettings(
     const NProust::EBaseGeneratorType baseGeneratorType,
     const TCsvContext& csvContext
 ) {
+    // The wide engine has no layout, topology or leaf-size knobs: they are ignored for it.
+    if (csvContext.Implementation == WIDE_IMPLEMENTATION_NAME && baseGeneratorType == NProust::EBaseGeneratorType::Range) {
+        const auto initStartedAt = std::chrono::high_resolution_clock::now();
+        spdlog::info("Using the wide range-update engine");
+        InitAndRunLoop<NProust::EBaseGeneratorType::Range>(std::make_unique<NProust::TWideRangeUpdateEngine<TValue, TOperationResult, TOperation>>(), streamer, csvContext, initStartedAt);
+        return;
+    }
     switch (layout) {
         case NProust::EDataLayout::AoS: {
             DispatchTopologyAndRun<TValue, TOperationResult, TOperation, NProust::TAoSLayout<TValue, TOperationResult, Sentinel>>(streamer, topology, leafSizeLog, baseGeneratorType, csvContext);

@@ -36,3 +36,11 @@ if(NOT MSVC)
 endif()
 add_executable(maxsum_microbench maxsum_microbench.cpp)
 target_link_libraries(maxsum_microbench PRIVATE project_dependencies)
+add_executable(init_microbench init_microbench.cpp)
+target_link_libraries(init_microbench PRIVATE project_dependencies)
+
+# Helpers of compare_builds.py: hardware counters (perf_event_open is Linux-only) and a busy-machine probe.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(perf_stat perf_stat.cpp)
+    add_executable(quiet_probe quiet_probe.cpp)
+endif()
