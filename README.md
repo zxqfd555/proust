@@ -22,6 +22,9 @@ In brief, the main lines are:
   - [FromMany (HasFromMany)](#frommany-hasfrommany)
     - [SIMD discussion](#simd-discussion)
   - [ApplyToMany (HasApplyToMany)](#applytomany-hasapplytomany)
+  - [MergeBlock (HasMergeBlock)](#mergeblock-hasmergeblock)
+  - [FoldInBlock (HasFoldInBlock)](#foldinblock-hasfoldinblock)
+  - [Checking that a hook is there](#checking-that-a-hook-is-there)
 - [Building a robust engine](#building-a-robust-engine)
   - [Memory management](#memory-management)
   - [Node topology](#node-topology)
@@ -51,6 +54,15 @@ In brief, the main lines are:
   - [Rejected by measurement](#rejected-by-measurement)
   - [Two measurement artifacts worth recording](#two-measurement-artifacts-worth-recording)
   - [Net effect of the round](#net-effect-of-the-round)
+- [A third round: a wide range-assignment engine](#a-third-round-a-wide-range-assignment-engine)
+  - [Measuring when the machine is in use](#measuring-when-the-machine-is-in-use)
+  - [The wide engine](#the-wide-engine)
+  - [Hooks for the wide engine](#hooks-for-the-wide-engine)
+  - [Which engine by default](#which-engine-by-default)
+  - [The same hook in the point engines: a trade-off](#the-same-hook-in-the-point-engines-a-trade-off)
+  - [Building from an array](#building-from-an-array)
+  - [Rejected in this round](#rejected-in-this-round)
+- [Library Checker: Range Set Range Composite](#library-checker-range-set-range-composite)
 - [Ensuring code quality](#ensuring-code-quality)
 - [Building and Dependencies](#building-and-dependencies)
 
@@ -151,7 +163,7 @@ The design decision here is still to heavily prefer templates over virtual metho
 
 The `ValidOperation` concept above is the mandatory minimum: every operation must provide *Repeat* (`FromRepeated`) and *Merge*, and with just those two the engine is already correct and complete. On top of that baseline, the engine recognizes two **optional** capabilities. Neither is required; each, when an operation happens to provide it, unlocks a faster path, and an operation that lacks it simply stays on the generic one. The detection is done with concepts and `if constexpr`, so it costs nothing at runtime and adds no virtual dispatch — an operation that doesn't expose a capability never pays for its absence.
 
-There are three of them, addressing three different places where the generic path leaves performance on the table: the *query strategy* on point-update engines (`Undo`), the *leaf work* at the bottom of any engine (`FromMany`), and the *bulk in-place modification* a wide point-update engine performs on every update (`ApplyToMany`). They are independent, and a given operation may expose any subset of them — the integer sum, for instance, exposes all three.
+There are five of them, addressing different places where the generic path leaves performance on the table: the *query strategy* on point-update engines (`Undo`), the *leaf work* at the bottom of any engine (`FromMany`), the *bulk in-place modification* a wide point-update engine performs on every update (`ApplyToMany`), and two hooks for the work on a 16-element block that the [wide range engine](#the-wide-engine) and the point engines do: the merge of a *whole* block (`MergeBlock`) and of a *part* of one (`FoldInBlock`). They are independent, and a given operation may expose any subset of them — the integer sum, for instance, exposes all three.
 
 ### Undo (HasUndo)
 
@@ -207,7 +219,7 @@ That is the very same `vpaddd` over a `%ymm` register we would have written by h
 
 One nuance deserves a precise statement, since it is easy to assume more than is true. The auto-vectorized loop above uses a *single* vector accumulator (`%ymm1`); under the default flags the compiler does **not** unroll the reduction across several independent accumulators to hide the latency of the dependent `vpaddd` chain. A four-accumulator form — produced either by hand-written intrinsics or by adding `-funroll-loops -fvariable-expansion-in-unroller` — is genuinely faster, but only on long, isolated reductions of hundreds to thousands of elements; for the sum that flag alone closes the entire gap, and for the maximum it narrows it. (Notably, hand-unrolling the *source* into four accumulators achieves nothing on its own: the optimizer's reduction recognizer merges them straight back into one.) None of this reaches the engine, for the same reason as before — the blocks are far too short for accumulator-level parallelism to pay off.
 
-The conclusion is that we ship no hand-vectorized `FromMany` for any of the provided operations: the compiler vectorizes the simple reductions for us, as the disassembly above shows. Whether the structure ever feeds them runs long enough for a hand-tuned kernel to earn its keep is, per the paragraph above, still unmeasured. The `HasFromMany` interface leaves the door open in principle — an operation whose block summary is genuinely expensive, or a deployment that deliberately runs very fat leaves, is free to supply a vectorized `FromMany` — but the engine will only pick it up once the concept matches the declaration.
+(A later round found where hand-written SIMD does pay off: not in long reductions but in removing a mispredicted loop exit on short, variable-length blocks, and in fixed 16-element folds of multi-field states -- see [FoldInBlock](#foldinblock-hasfoldinblock) and [MergeBlock](#mergeblock-hasmergeblock).) The conclusion is that we ship no hand-vectorized `FromMany` for any of the provided operations: the compiler vectorizes the simple reductions for us, as the disassembly above shows. Whether the structure ever feeds them runs long enough for a hand-tuned kernel to earn its keep is, per the paragraph above, still unmeasured. The `HasFromMany` interface leaves the door open in principle — an operation whose block summary is genuinely expensive, or a deployment that deliberately runs very fat leaves, is free to supply a vectorized `FromMany` — but the engine will only pick it up once the concept matches the declaration.
 
 ### ApplyToMany (HasApplyToMany)
 
@@ -221,6 +233,46 @@ concept HasApplyToMany = requires(TOperationResult* block, size_t count, size_t 
 `ApplyToMany` folds a single `delta` into a contiguous run of accumulators in place: its contract is exactly the loop `for (i = from; i < count; ++i) block[i] = Merge(block[i], delta)`, with `block[0 .. from)` readable but left untouched. The name describes *what* it does — merge one value into many — deliberately, not *where* the engine happens to need it, so that an operation author need not understand the tree's internal block layout to provide one.
 
 Where the engine needs it is the wide, Fenwick-style point-update engine ([fat engine](#bottlenecks-fat-engine)): on every update it folds the delta into the *suffix* of one sibling block per level, and by default does so with a short scalar loop. An operation that exposes `ApplyToMany` can replace that loop with whatever it likes — the natural choice for a fixed-width block being a single masked vector instruction that touches the whole block at once, masking off the prefix it must not modify. `TSumOperation` and `TBitwiseXorOperation` provide such AVX2 implementations for the integer and `double` widths; an operation that provides none keeps the portable scalar fallback, so the engine stays fully generic. This is the same masked-block idea that the wide segment tree uses for its propagation, exposed as one optional operation method rather than baked into the structure; the [vectorized-update concept](#borrowing-the-wide-trees-trick-a-vectorized-update-concept) section walks through how it came about and what it measures.
+
+### MergeBlock (HasMergeBlock)
+
+```cpp
+template<typename TOperation, typename TOperationResult>
+concept HasMergeBlock = requires(const TOperationResult* block) {
+    { TOperation::template MergeBlock<TOperationResult>(block) } -> std::same_as<TOperationResult>;
+};
+```
+
+`MergeBlock` merges exactly 16 consecutive results, in order: its contract is `Merge(... Merge(block[0], block[1]) ..., block[15])`. That is the bulk of the work of an assignment in the [wide engine](#the-wide-engine), which refolds one 16-slot node per level on both boundary paths; without the hook it is a chain of 15 `Merge` calls, each waiting for the previous one. A fixed shape invites SIMD, and a fixed shape *only* -- a full block needs no neutral element, so the hook is safe for operations that do not have one.
+
+The maximum-subarray operation implements it with AVX2. Its state is four `int32` fields, `{best, prefix, suffix, sum}`, and all four merged fields are "the larger of a sum and an old field", so one merge is a couple of in-register shuffles, an add, and a max -- for two merges at once, one per 128-bit half of a register. Sixteen states fold as a tree 16 -> 8 -> 4 -> 2 -> 1. The measured effect is in [Hooks for the wide engine](#hooks-for-the-wide-engine).
+
+### FoldInBlock (HasFoldInBlock)
+
+```cpp
+template<typename TOperation, typename TOperationResult, typename TElement>
+concept HasFoldInBlock = requires(const TElement* block, size_t from, size_t to) {
+    { TOperation::template FoldInBlock<TOperationResult>(block, from, to) } -> std::same_as<TOperationResult>;
+};
+```
+
+`FoldInBlock` merges the elements `[from, to)` of a 16-element block, for `from < to`. `TElement` is what the block holds: results (a node of the wide engine) or raw values (a leaf, or the value array of a point engine); for values the contract is the chain over `FromRepeated(block[i], 1)`. All 16 elements may be read.
+
+The point of the hook is not the arithmetic but a branch. A partial block has a data-dependent length, so a loop over it ends at a different iteration on almost every call, and its exit branch mispredicts -- the very effect [measured in the fat engine](#where-the-generic-engines-query-time-goes-the-fat-leafs-brute-force-scan), where it flushes the out-of-order window holding the next queries' cache misses. An operation with a known neutral element can take the whole block in SIMD lanes, replace the lanes outside `[from, to)` with that element under a mask, and reduce with no branch at all. The sum (neutral 0) and the maximum (neutral `INT32_MIN`) implement it for `int32` with AVX2.
+
+It is deliberately used only for *partial* blocks. A whole block is a loop of fixed length, which the predictor learns and the compiler vectorizes by itself; routing it through the masked kernel measured 7.5% slower on assignments.
+
+### Checking that a hook is there
+
+Like `FromMany` before it (see the [SIMD discussion](#simd-discussion)), a hook whose signature drifts slightly does not fail to compile: the concept just evaluates to false and the engine silently takes the generic path. The check is a `static_assert` on the same concept the engine uses:
+
+```cpp
+static_assert(NProust::HasFoldInBlock<NProust::TSumOperation, int32_t, int32_t>);
+static_assert(NProust::HasFoldInBlock<NProust::TMaxOperation, int32_t, int32_t>);
+static_assert(NProust::HasMergeBlock<NProustExamples::TMaxSumStateOperation, NProustExamples::TMaxSumState>);
+```
+
+The shipped hooks exist only when the code is compiled for AVX2 (`-march=native` in the release build, or `-mavx2`); elsewhere these asserts fail by design, and the engines run the plain `Merge` chains. The tests therefore run twice: as usual, and in a second build with `-mavx2`, where the engines' stress tests go through the hooks, and the hooks are also compared directly against the `Merge` chain on every `[from, to)` of random blocks.
 
 ## Building a robust engine
 
@@ -653,6 +705,80 @@ The accepted set — the one-sided fringe walks, the branchless top-K merge, and
 | Order statistic (K=16) | **1.15×** | **1.23×** |
 
 The point flavors of sum and max are untouched by construction (they run the fat/point engines, whose code this round did not change) and duly measure as noise — a useful negative control for the protocol itself. Every range cell improves, the cheap operations the most, and the order-statistic point cell gets its branchless merge. The pre-round tables above ([per-operation](#per-operation-latency-barrier-separated) and [throughput](#aggregate-throughput-no-barriers)) still show the older binary's numbers; re-measuring them wholesale on quiet hardware is left for the next full benchmarking session.
+
+## A third round: a wide range-assignment engine
+
+The two rounds above tuned the binary engine. This one asked how far a different shape goes: the profile of the range datasets shows the binary engine mispredicting about **16 branches per operation** (166 million over the 10 million operations of a range dataset), and at a length of 10^6 the whole structure fits in the 8 MB L3 -- so the range engine is bound by its branches at least as much as by memory. Everything below is measured on the same laptop, datasets and length as the tables above; "average" and "per-operation" are the runner's two [measurement modes](#benchmark-results).
+
+### Measuring when the machine is in use
+
+The interleaving protocol of the [first round](#measuring-on-a-thermally-noisy-laptop) turned out not to be enough on a laptop in everyday use. Work on the Windows host is invisible from inside WSL -- its load figures stay near zero -- and it can slow down several rounds in a row by a factor of three or four, enough to move a median and to make unchanged code look 40% faster or slower. Three things were added, in `benchmarks/compare_builds.py`, which runs every benchmark of this README over several builds:
+
+- **A busy-machine probe** (`benchmarks/quiet_probe.cpp`): a fixed mix of arithmetic and random memory accesses, run before and after every measurement. If it comes out more than 15% slower than the best of the recent probes, the run waits for the machine to calm down, and a measurement that ended busy is repeated. Only recent probes count, so a lasting slowdown (a thermal state, a power mode) becomes the new normal instead of stopping the run.
+- **The median of the fastest half** of each cell instead of the median of all: other work can only add time.
+- **Hardware counters** (`benchmarks/perf_stat.cpp`, a small `perf_event_open` wrapper, since WSL ships no `perf`): the instruction count of identical code differs by 0.00% between runs, and cycles and branch misses by well under 1%, against several percent for wall-clock time.
+
+Noise thresholds come from comparing a build with itself and with the same code shifted in memory (a padding function prepended to every translation unit), since code layout alone moves these numbers by a few percent. With the probe, the median noise of `avg_ns_per_query` fell from 5.5% to 2.5%, of cycles to 0.7%. A change is kept when it improves some cell beyond that threshold and loses in none -- with one deliberate exception, [described below](#the-same-hook-in-the-point-engines-a-trade-off).
+
+### The wide engine
+
+`TWideRangeUpdateEngine` (`include/engine/wide/engine.h`) is a 16-ary range-assignment engine that asks nothing of the operation beyond `FromRepeated` and `Merge`. Leaves hold 16 raw values; a node of level h holds 16 slots, each with the result of a child spanning 16^h elements and, if that whole child was assigned a value it has not seen yet, that value as a lazy tag (one bitmask per node says which slots are tagged). The tree spans a multiple of 16^h elements; a slot reaching past the length holds a valid but meaningless result built from `TValue()`, which is never read -- no operation inside the length can fully cover such a slot -- so no neutral element is needed.
+
+An assignment descends while the range stays inside one slot, then walks its **two boundary paths side by side**, level by level, and refolds them side by side: two independent dependency chains instead of one twice as long. Covered slots and the leaf range are written with fixed-shape selects that compile to blends rather than loops. A query never pushes tags (a tagged boundary slot answers with `FromRepeated`) and is **unrolled by level**: a template parameter makes every span a constant and gives every level its own branches, which the predictor then learns separately.
+
+Against the binary engine at its *best* configuration, not just the defaults of the tables above (leaves of 16 to 256 elements, with and without the sentinel), the wide engine wins on the cheap operations. The wide figures include the hooks [below](#hooks-for-the-wide-engine); the two columns come from separate interleaved runs.
+
+| Range dataset, average mode | Wide | Best binary | Difference |
+| --- | ---: | ---: | ---: |
+| Sum | 100 ns | 155 ns (leaf 64, sentinel) | -36% |
+| Max | 102 ns | 156 ns (leaf 64) | -35% |
+| Max-subarray (with `MergeBlock`) | 164 ns | 207 ns (leaf 64) | -21% |
+| Order statistic (K=16) | 918 ns | 648 ns (leaf 16, the only one measured) | +42% |
+
+The branch misses tell why: about 8 per operation against 16. Memory is 9% below the binary engine's default configuration and within 4% of its leanest one. The order statistic shows the limit: a 16-slot refold of a 68-byte top-K state is far more work than the two-child merges of a binary node, and nothing in the branch savings makes up for it.
+
+### Hooks for the wide engine
+
+Two optional hooks ([MergeBlock](#mergeblock-hasmergeblock), [FoldInBlock](#foldinblock-hasfoldinblock)) target the two kinds of block work:
+
+- `MergeBlock` on the maximum subarray turned the wide engine from 15% *slower* than the binary default into 21% faster than the best binary configuration, with 22% fewer instructions and 37% fewer branch misses than the latter.
+- `FoldInBlock` on the sum and the maximum, against the wide engine without it: the median query fell by 25-27% (68 -> 51 TSC cycles), branch misses by 12%, the average by 6-7%; assignments stayed within noise.
+
+### Which engine by default
+
+`include/engine/default.h` provides `TDefaultRangeUpdateEngine` and `CreateRangeUpdateEngine()`, which pick an engine from the types alone. Whether the wide shape pays off depends on the cost of a merge, which the types cannot tell -- the size of the result is only a rough proxy:
+
+| Result | Size | Wide / best binary |
+| --- | ---: | ---: |
+| Max, `int32` | 4 B | 0.67 |
+| Max, `int64` | 8 B | 0.68 |
+| Sum, `int64` | 8 B | 0.62 |
+| Sum and max of the same range (cheap merge) | 16 B | 0.82 |
+| Maximum subarray (expensive merge, no hook) | 16 B | 1.35 |
+| Four cheap fields | 32 B | 0.95 |
+
+At 16 bytes the outcome already depends on the operation, so the default is the wide engine for results of up to 8 bytes, or whenever the operation provides `MergeBlock` -- which says that the fold of a block was made cheap on purpose. Everything else stays binary. A task that knows better simply names the engine it wants.
+
+### The same hook in the point engines: a trade-off
+
+The point engines fold a partial leaf with the same variable-length loop, and `FoldInBlock` applies there too (a partial leaf always lies inside one aligned 16-element block). On streams of operations it is the largest gain of the round: the fat engine's bare prefix query goes from 14.9 to 8.2 ns and its range query from 26.6 to 14.7 ns, the fence experiment's throughput from 13.7 to 7.2 ns, and on the runner's point datasets the average falls by 18% (sum) and 11% (max), with branch misses down 55% and 39%. Updates do not change. This is what the [leaf-prefix experiment](#where-the-generic-engines-query-time-goes-the-fat-leafs-brute-force-scan) promised, without its price in update cost.
+
+It is not free in isolation, though. With fences around every operation the prefix query gets *slower* -- 41 -> 47 ns in the branching benchmark, 42 -> 46 ns in the fence experiment -- because a single short loop that the predictor happens to guess right is quicker than computing a mask. Fenced range queries still improve (by 5-9%). The hook is kept for the throughput it brings, at that cost.
+
+### Building from an array
+
+`InitFrom(values)` builds every engine in O(N) from an array, bottom-up, instead of `Init` followed by one modification per element. A new benchmark (`benchmarks/init_microbench.cpp`) compares the two for each operation and engine of the datasets, and checks the two structures against each other on random queries: `InitFrom` is 14-96 times faster. The point engines also write their value array once rather than zero-filling it first, which made their build 13-21% faster still.
+
+### Rejected in this round
+
+- **Prefetching the paths of upcoming operations.** Unlike the [descent-time prefetch](#what-did-not-work) rejected before, this one ran ahead across operations: the runner read eight operations ahead and asked the engine to start loading the lowest levels of their paths. With the whole structure in L3 there was nothing for it to hide; cycles grew by 0.6-8% and instructions by 3-8%.
+- **Hand-tuned binary-engine descents** were put aside rather than rejected: the wide engine covers the cheap operations, where they would have mattered most.
+
+## Library Checker: Range Set Range Composite
+
+`external-benchmarks/library-checker/range_set_range_composite/` holds a solution of [Range Set Range Composite](https://judge.yosupo.jp/problem/range_set_range_composite): assign a linear function `x -> c x + d` to a range, and evaluate the composition of the functions over a range at a point, modulo 998244353, for up to 5 * 10^5 elements and operations. It is a self-contained file built on the same ideas as the wide engine: a 16-ary tree whose nodes are written with masks; folds of a block in AVX2 lanes, with Montgomery arithmetic kept in [0, 2p) and one product per composition; per-assignment records of the powers f, f^2, f^4, ... built 16 at a time in SIMD lanes; and the paths of upcoming operations prefetched. `stress.sh` checks it against a brute force and an independent lazy segment tree.
+
+As of November 11, 2026, it is the fastest accepted solution of the problem on Library Checker: 122 ms on its slowest test ([submission 414997](https://judge.yosupo.jp/submission/414997)).
 
 ## Ensuring code quality
 
